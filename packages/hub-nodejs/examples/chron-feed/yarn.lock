@@ -164,9 +164,9 @@
     neverthrow "^6.0.0"
 
 "@grpc/grpc-js@~1.8.21":
-  version "1.8.21"
-  resolved "https://registry.npmjs.org/@grpc/grpc-js/-/grpc-js-1.8.21.tgz#d282b122c71227859bf6c5866f4c40f4a2696513"
-  integrity sha512-KeyQeZpxeEBSqFVTi3q2K7PiPXmgBfECc4updA1ejCLjYmoAlvvM3ZMp5ztTDUCUQmoY3CpDxvchjO1+rFkoHg==
+  version "1.8.22"
+  resolved "https://registry.npmjs.org/@grpc/grpc-js/-/grpc-js-1.8.22.tgz#847930c9af46e14df05b57fc12325db140ceff1d"
+  integrity sha512-oAjDdN7fzbUi+4hZjKG96MR6KTEubAeMpQEb+77qy+3r0Ua5xTFuie6JOLr4ZZgl5g+W5/uRTS2M1V8mVAFPuA==
   dependencies:
     "@grpc/proto-loader" "^0.7.0"
     "@types/node" ">=12.12.47"
@@ -493,9 +493,9 @@ node-gyp-build@^4.2.1:
   integrity sha512-24vnklJmyRS8ViBNI8KbtK/r/DmXQMRiOMXTNz2nrTnAYUwjmEEbnnpB/+kt+yWRv73bPsSPRFddrcIbAxSiMQ==
 
 protobufjs@^7.0.0:
-  version "7.2.4"
-  resolved "https://registry.npmjs.org/protobufjs/-/protobufjs-7.2.4.tgz#3fc1ec0cdc89dd91aef9ba6037ba07408485c3ae"
-  integrity sha512-AT+RJgD2sH8phPmCf7OUZR8xGdcJRga4+1cOaXJ64hvcSkVhNcRHOwIxUatPH15+nj59WAGTDv3LSGZPEQbJaQ==
+  version "7.4.0"
+  resolved "https://registry.npmjs.org/protobufjs/-/protobufjs-7.4.0.tgz#7efe324ce9b3b61c82aae5de810d287bc08a248a"
+  integrity sha512-mRUWCc3KUU4w1jU8sGxICXH/gNS94DvI1gxqDvBzhj1JpcsimQkYiOJfwsPUykUI5ZaspFbSgmBLER8IrQ3tqw==
   dependencies:
     "@protobufjs/aspromise" "^1.1.2"
     "@protobufjs/base64" "^1.1.2"
