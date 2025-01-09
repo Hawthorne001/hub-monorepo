@@ -1,7 +1,7 @@
 # Events
 
 - [Hub Events](#hub-events)
-- [On-Chain Events](#on-chain-events)
+- [Onchain Events](#onchain-events)
 
 ## Hub Events
 
@@ -50,7 +50,7 @@ Emit when an IdRegistryEvent is merged into the Hub.
 
 ### MergeNameRegistry
 
-Emit when an NameRegistryEvent is merged into the Hub.
+Emit when a NameRegistryEvent is merged into the Hub.
 
 | Name              | Type                            | Description                               |
 | ----------------- | ------------------------------- | ----------------------------------------- |
@@ -58,13 +58,13 @@ Emit when an NameRegistryEvent is merged into the Hub.
 | type              | [`HubEventType`](#hubeventtype) | Always set to `MERGE_NAME_REGISTRY_EVENT` |
 | nameRegistryEvent | `NameRegistryEvent`             | The message that was merged               |
 
-## On-Chain Events
+## Onchain Events
 
 Emitted by contracts whenever the ownership of fids or fnames changes.
 
 ### IdRegistryEvent
 
-Emit when an on-chain event occurs in the IdRegistry which registers or transfers an fid.
+Emit when an onchain event occurs in the IdRegistry which registers or transfers an fid.
 
 | Name            | Type                        | Description                                              |
 | --------------- | --------------------------- | -------------------------------------------------------- |
@@ -75,11 +75,11 @@ Emit when an on-chain event occurs in the IdRegistry which registers or transfer
 | logIndex        | `number`                    | The log index of the event in the transaction.           |
 | to              | `Uint8Array`                | The address which now owns the fid.                      |
 | transactionHash | `Uint8Array`                | The hash of the transaction in which the event occurred. |
-| type            | [`NameRegistryEventType`]() | The type of event which occurred.                        |
+| type            | [`IdRegistryEventType`](#idregistryeventtype) | The type of event which occurred.                        |
 
 ### NameRegistryEvent
 
-Emit when an on-chain event occurs in the NameRegistry which registers, transfers or renews an fname.
+Emit when an onchain event occurs in the NameRegistry which registers, transfers or renews an fname.
 
 | Name            | Type                                              | Description                                              |
 | --------------- | ------------------------------------------------- | -------------------------------------------------------- |
@@ -122,4 +122,4 @@ The Farcaster network that will accept the message.
 | --------------------------------- | ------ | ----------------------------------- |
 | NAME_REGISTRY_EVENT_TYPE_NONE     | 0      |                                     |
 | NAME_REGISTRY_EVENT_TYPE_TRANSFER | 1      | An fname was minted or transferred. |
-| NAME_REGISTRY_EVENT_TYPE_RENEW    | 1      | An fname was renewed.               |
+| NAME_REGISTRY_EVENT_TYPE_RENEW    | 2      | An fname was renewed.               |

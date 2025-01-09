@@ -1,6 +1,6 @@
 use super::{
     bytes_compare, encode_messages_to_js_object, get_page_options, get_store,
-    hub_error_to_js_throw, make_user_key,
+    hub_error_to_js_throw, is_message_in_time_range, make_user_key,
     name_registry_events::{
         delete_username_proof_transaction, get_fname_proof_by_fid, get_username_proof,
         put_username_proof_transaction,
@@ -50,12 +50,24 @@ impl StoreDef for UserDataStoreDef {
         false
     }
 
-    fn find_merge_add_conflicts(&self, _message: &Message) -> Result<(), HubError> {
+    fn compact_state_message_type(&self) -> u8 {
+        MessageType::None as u8
+    }
+
+    fn is_compact_state_type(&self, _message: &Message) -> bool {
+        false
+    }
+
+    fn find_merge_add_conflicts(&self, _db: &RocksDB, _message: &Message) -> Result<(), HubError> {
         // No conflicts
         Ok(())
     }
 
-    fn find_merge_remove_conflicts(&self, _message: &Message) -> Result<(), HubError> {
+    fn find_merge_remove_conflicts(
+        &self,
+        _db: &RocksDB,
+        _message: &Message,
+    ) -> Result<(), HubError> {
         Err(HubError {
             code: "bad_request.invalid_param".to_string(),
             message: "UserDataStoree doesn't support merging removes".to_string(),
@@ -84,6 +96,20 @@ impl StoreDef for UserDataStoreDef {
         Err(HubError {
             code: "bad_request.invalid_param".to_string(),
             message: "removes not supported".to_string(),
+        })
+    }
+
+    fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, HubError> {
+        Err(HubError {
+            code: "bad_request.invalid_param".to_string(),
+            message: "UserDataStore doesn't support compact state".to_string(),
+        })
+    }
+
+    fn make_compact_state_prefix(&self, _fid: u32) -> Result<Vec<u8>, HubError> {
+        Err(HubError {
+            code: "bad_request.invalid_param".to_string(),
+            message: "UserDataStore doesn't support compact state".to_string(),
         })
     }
 
@@ -200,8 +226,16 @@ impl UserDataStore {
         store: &Store,
         fid: u32,
         page_options: &PageOptions,
+        start_time: Option<u32>,
+        stop_time: Option<u32>,
     ) -> Result<MessagesPage, HubError> {
-        store.get_adds_by_fid(fid, page_options, Some(|_message: &Message| true))
+        store.get_adds_by_fid(
+            fid,
+            page_options,
+            Some(|message: &Message| {
+                return is_message_in_time_range(start_time, stop_time, message);
+            }),
+        )
     }
 
     pub fn js_get_user_data_adds_by_fid(mut cx: FunctionContext) -> JsResult<JsPromise> {
@@ -209,8 +243,28 @@ impl UserDataStore {
 
         let fid = cx.argument::<JsNumber>(0)?.value(&mut cx) as u32;
         let page_options = get_page_options(&mut cx, 1)?;
+        let start_time = match cx.argument_opt(2) {
+            Some(arg) => match arg.downcast::<JsNumber, _>(&mut cx) {
+                Ok(v) => Some(v.value(&mut cx) as u32),
+                _ => None,
+            },
+            None => None,
+        };
+        let stop_time = match cx.argument_opt(3) {
+            Some(arg) => match arg.downcast::<JsNumber, _>(&mut cx) {
+                Ok(v) => Some(v.value(&mut cx) as u32),
+                _ => None,
+            },
+            None => None,
+        };
 
-        let messages = match Self::get_user_data_adds_by_fid(&store, fid, &page_options) {
+        let messages = match Self::get_user_data_adds_by_fid(
+            &store,
+            fid,
+            &page_options,
+            start_time,
+            stop_time,
+        ) {
             Ok(messages) => messages,
             Err(e) => return hub_error_to_js_throw(&mut cx, e),
         };
@@ -237,7 +291,13 @@ impl UserDataStore {
         let name = name_buffer.as_slice(&mut cx);
 
         let result = match Self::get_username_proof(&store, &name) {
-            Ok(Some(proof)) => proof.encode_to_vec(),
+            Ok(Some(proof)) => match proof.fid {
+                0 => cx.throw_error(format!(
+                    "{}/{}",
+                    "not_found", "NotFound: UserDataAdd message not found"
+                ))?,
+                _ => proof.encode_to_vec(),
+            },
             Ok(None) => cx.throw_error(format!(
                 "{}/{}",
                 "not_found", "NotFound: UserDataAdd message not found"
@@ -292,6 +352,7 @@ impl UserDataStore {
         username_proof: &protos::UserNameProof,
     ) -> Result<Vec<u8>, HubError> {
         let existing_proof = get_username_proof(&store.db(), &username_proof.name)?;
+        let mut existing_fid: Option<u32> = None;
 
         if existing_proof.is_some() {
             let cmp =
@@ -309,6 +370,7 @@ impl UserDataStore {
                     message: "event conflicts with a more recent UserNameProof".to_string(),
                 });
             }
+            existing_fid = Some(existing_proof.as_ref().unwrap().fid as u32);
         }
 
         if existing_proof.is_none() && username_proof.fid == 0 {
@@ -320,7 +382,7 @@ impl UserDataStore {
 
         let mut txn = RocksDbTransactionBatch::new();
         if username_proof.fid == 0 {
-            delete_username_proof_transaction(&mut txn, username_proof);
+            delete_username_proof_transaction(&mut txn, username_proof, existing_fid);
         } else {
             put_username_proof_transaction(&mut txn, username_proof);
         }

@@ -1,12 +1,17 @@
 use super::{HubError, MessagesPage, PageOptions, Store, FARCASTER_EPOCH};
-use crate::db::RocksDB;
+use crate::{
+    db::{JsIteratorOptions, RocksDB},
+    trie::merkle_trie::{MerkleTrie, NodeMetadata},
+};
 use neon::{
     context::{Context, FunctionContext, TaskContext},
+    event::Channel,
     object::Object,
     result::{JsResult, Throw},
-    types::{buffer::TypedArray, JsArray, JsBoolean, JsBox, JsBuffer, JsNumber, JsObject},
+    types::{
+        buffer::TypedArray, Deferred, JsArray, JsBoolean, JsBox, JsBuffer, JsNumber, JsObject,
+    },
 };
-use prost::Message as _;
 use std::{borrow::Borrow, sync::Arc};
 
 /**
@@ -60,6 +65,7 @@ pub fn increment_vec_u8(vec: &Vec<u8>) -> Vec<u8> {
 }
 
 /** Derement the bytes of a Vec<u8> as if it were a big-endian number */
+#[allow(dead_code)]
 pub fn decrement_vec_u8(vec: &Vec<u8>) -> Vec<u8> {
     let mut result = vec.clone(); // Clone the input vector to create a new one for the result
     let mut borrow = true; // Start with a borrow to simulate the decrement
@@ -94,10 +100,8 @@ pub fn encode_messages_to_js_object<'a>(
     cx: &mut TaskContext<'a>,
     messages_page: MessagesPage,
 ) -> JsResult<'a, JsObject> {
-    let js_messages = JsArray::new(cx, messages_page.messages.len() as u32);
-    for (i, message) in messages_page.messages.iter().enumerate() {
-        let message_bytes = message.encode_to_vec();
-
+    let js_messages = JsArray::new(cx, messages_page.messages_bytes.len());
+    for (i, message_bytes) in messages_page.messages_bytes.iter().enumerate() {
         let mut js_buffer = cx.buffer(message_bytes.len())?;
         js_buffer.as_mut_slice(cx).copy_from_slice(&message_bytes);
         js_messages.set(cx, i as u32, js_buffer)?;
@@ -120,11 +124,48 @@ pub fn encode_messages_to_js_object<'a>(
     Ok(js_object)
 }
 
+/** Encode the node metadata into a Js Object */
+pub fn encode_node_metadata_to_js_object<'a>(
+    tcx: &mut TaskContext<'a>,
+    node_metadata: &NodeMetadata,
+) -> JsResult<'a, JsObject> {
+    let js_object = JsObject::new(tcx);
+
+    let mut js_prefix = tcx.buffer(node_metadata.prefix.len())?;
+    js_prefix
+        .as_mut_slice(tcx)
+        .copy_from_slice(&node_metadata.prefix);
+    js_object.set(tcx, "prefix", js_prefix)?;
+
+    let js_num_messages = tcx.number(node_metadata.num_messages as f64);
+    js_object.set(tcx, "numMessages", js_num_messages)?;
+
+    let js_hash = tcx.string(node_metadata.hash.clone());
+    js_object.set(tcx, "hash", js_hash)?;
+
+    // We can't return a map from rust to JS, so we return two arrays,
+    // one with keys and one with values
+    let js_keys = JsArray::new(tcx, node_metadata.children.len());
+    let js_values = JsArray::new(tcx, node_metadata.children.len());
+    for (i, (key, child_metadata)) in node_metadata.children.iter().enumerate() {
+        let js_key = JsNumber::new(tcx, *key as f64);
+        js_keys.set(tcx, i as u32, js_key)?;
+
+        let js_child_metadata = encode_node_metadata_to_js_object(tcx, child_metadata)?;
+        js_values.set(tcx, i as u32, js_child_metadata)?;
+    }
+
+    js_object.set(tcx, "childrenKeys", js_keys)?;
+    js_object.set(tcx, "childrenValues", js_values)?;
+
+    Ok(js_object)
+}
+
 /**
 * Extract the page options from a JavaScript object at the given index. Fills in default values
 * if they are not provided.
 */
-pub fn get_page_options(cx: &mut FunctionContext, at: i32) -> Result<PageOptions, Throw> {
+pub fn get_page_options(cx: &mut FunctionContext, at: usize) -> Result<PageOptions, Throw> {
     let js_object = cx.argument::<JsObject>(at)?;
 
     let page_size = js_object
@@ -150,21 +191,72 @@ pub fn get_page_options(cx: &mut FunctionContext, at: i32) -> Result<PageOptions
     })
 }
 
+/**
+ * Extract the iterator opts
+ */
+pub fn get_iterator_options(
+    cx: &mut FunctionContext,
+    at: usize,
+) -> Result<JsIteratorOptions, Throw> {
+    let js_opts = cx.argument::<JsObject>(at)?;
+    let reverse = js_opts
+        .get_opt::<JsBoolean, _, _>(cx, "reverse")?
+        .map_or(false, |js_boolean| js_boolean.value(cx));
+    let gte = match js_opts.get_opt::<JsBuffer, _, _>(cx, "gte")? {
+        Some(buffer) => Some(buffer.as_slice(cx).to_vec()),
+        None => None,
+    };
+    let gt = match js_opts.get_opt::<JsBuffer, _, _>(cx, "gt")? {
+        Some(buffer) => Some(buffer.as_slice(cx).to_vec()),
+        None => None,
+    };
+    let lt = js_opts
+        .get::<JsBuffer, _, _>(cx, "lt")?
+        .as_slice(cx)
+        .to_vec();
+
+    Ok(JsIteratorOptions {
+        reverse,
+        gte,
+        gt,
+        lt,
+    })
+}
+
 /** Get the store object from the context */
 pub fn get_store(cx: &mut FunctionContext) -> Result<Arc<Store>, Throw> {
-    let store_js_box = cx.this().downcast_or_throw::<JsBox<Arc<Store>>, _>(cx)?;
+    let store_js_box = cx.this::<JsBox<Arc<Store>>>()?;
     Ok((**store_js_box.borrow()).clone())
 }
 
+/** Get the rust DB */
 pub fn get_db(cx: &mut FunctionContext) -> Result<Arc<RocksDB>, Throw> {
-    let db_js_box = cx.this().downcast_or_throw::<JsBox<Arc<RocksDB>>, _>(cx)?;
+    let db_js_box = cx.this::<JsBox<Arc<RocksDB>>>()?;
     Ok((**db_js_box.borrow()).clone())
+}
+
+/** Get the merkle trie object */
+pub fn get_merkle_trie(cx: &mut FunctionContext) -> Result<Arc<MerkleTrie>, Throw> {
+    let merkle_trie_js_box = cx.this::<JsBox<Arc<MerkleTrie>>>()?;
+    Ok((**merkle_trie_js_box.borrow()).clone())
 }
 
 pub fn hub_error_to_js_throw<'a, T, U: Context<'a>>(cx: &mut U, e: HubError) -> Result<T, Throw> {
     cx.throw_error::<String, T>(format!("{}/{}", e.code, e.message))
 }
 
+pub fn deferred_settle_messages(
+    deferred: Deferred,
+    channel: &Channel,
+    messages: Result<MessagesPage, HubError>,
+) {
+    deferred.settle_with(&channel, |mut cx| match messages {
+        Ok(messages) => encode_messages_to_js_object(&mut cx, messages),
+        Err(e) => hub_error_to_js_throw(&mut cx, e),
+    });
+}
+
+#[allow(dead_code)]
 pub fn to_farcaster_time(time_ms: u64) -> Result<u64, HubError> {
     if time_ms < FARCASTER_EPOCH {
         return Err(HubError {
@@ -184,10 +276,12 @@ pub fn to_farcaster_time(time_ms: u64) -> Result<u64, HubError> {
     Ok(seconds_since_epoch as u64)
 }
 
+#[allow(dead_code)]
 pub fn from_farcaster_time(time: u64) -> u64 {
     time * 1000 + FARCASTER_EPOCH
 }
 
+#[allow(dead_code)]
 pub fn get_farcaster_time() -> Result<u64, HubError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -217,6 +311,17 @@ pub fn bytes_compare(a: &[u8], b: &[u8]) -> i8 {
     }
 }
 
+/**
+ * The hashes in the sync trie are 20 bytes (160 bits) long, so we use the first 20 bytes of the blake3 hash
+ */
+const BLAKE3_HASH_LEN: usize = 20;
+pub fn blake3_20(input: &[u8]) -> Vec<u8> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(input);
+    hasher.finalize().as_bytes()[..BLAKE3_HASH_LEN].to_vec()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

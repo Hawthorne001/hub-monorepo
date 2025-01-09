@@ -1,10 +1,10 @@
 # Client
 
-A Client established a connection with a Farcaster Hub and can be used to send and receive messages. It is initialized
+A Client established a connection with a Farcaster Hub which can be used to send and receive messages. It is initialized
 with the IP address and gRPC port of the Hub. Once connected, a Client instance can:
 
 - Query for messages by user or type.
-- Query for on-chain Farcaster Contracts state.
+- Query for onchain Farcaster Contracts state.
 - Subscribe to changes by type.
 - Upload new messages.
 
@@ -102,7 +102,7 @@ successful response of type `<T>` or an error value. There are three types of re
 - [MessagesResult<T>](#messagesresult)
 - [FidsResult<T>](#fidsresult)
 
-Results always return an object of type `Message` instead of a more specific type like `CastAddMessage` due to a quick of the protobuf-generated types. This can be easily remedied by passing responses through a typeguard:
+Results always return an object of type `Message` instead of a more specific type like `CastAddMessage` due to a quirk of the protobuf-generated types. This can be easily remedied by passing responses through a typeguard:
 
 ```typescript
 import { isCastAddMessage } from '@farcaster/hub-nodejs';
@@ -166,7 +166,7 @@ client.$.waitForReady(Date.now() + 5000, async (e) => {
 
 ### getSigner
 
-Returns an active signer message given an fid and the public key of the signer.
+Returns an active signer message given a fid and the public key of the signer.
 
 #### Usage
 
@@ -214,7 +214,7 @@ client.$.waitForReady(Date.now() + 5000, async (e) => {
 
 ### getSignersByFid
 
-Returns all active signers created by an fid in reverse chronological order.
+Returns all active signers created by a fid in reverse chronological order.
 
 #### Usage
 
@@ -529,7 +529,7 @@ Returns all active casts that are replies to a specific cast in reverse chronolo
 #### Usage
 
 ```typescript
-import { geSSLHubRpcClient, hexStringToBytes } from '@farcaster/hub-nodejs';
+import { getSSLHubRpcClient, hexStringToBytes } from '@farcaster/hub-nodejs';
 
 const hubRpcEndpoint = 'testnet1.farcaster.xyz:2283';
 const client = getSSLHubRpcClient(hubRpcEndpoint);
@@ -544,7 +544,7 @@ client.$.waitForReady(Date.now() + 5000, async (e) => {
     const castHashHex = 'ee04762bea3060ce3cca154bced5947de04aa253';
     const castHashBytes = hexStringToBytes(castHashHex)._unsafeUnwrap(); // Safety: castHashHex is known
 
-    const castsResult = await client.getCastsByParent({ castId: { fid: 2, hash: castHashBytes } });
+    const castsResult = await client.getCastsByParent({ parentCastId: { fid: 2, hash: castHashBytes } });
 
     castsResult.map((casts) => console.log(casts.messages));
     client.close();
@@ -620,7 +620,7 @@ Returns an active reaction of a particular type made by a user to a cast.
 #### Usage
 
 ```typescript
-import { geSSLHubRpcClient, hexStringToBytes, ReactionType } from '@farcaster/hub-nodejs';
+import { getSSLHubRpcClient, hexStringToBytes, ReactionType } from '@farcaster/hub-nodejs';
 
 const hubRpcEndpoint = 'testnet1.farcaster.xyz:2283';
 const client = getSSLHubRpcClient(hubRpcEndpoint);
@@ -1093,7 +1093,7 @@ client.$.waitForReady(Date.now() + 5000, async (e) => {
 
 ### getNameRegistryEvent
 
-Returns the on-chain event most recently associated with changing an fname's ownership.
+Returns the onchain event most recently associated with changing an fname's ownership.
 
 #### Usage
 
@@ -1137,7 +1137,7 @@ client.$.waitForReady(Date.now() + 5000, async (e) => {
 
 A documentation alias for `HubAsyncResult<Message>` where the success value contains a single message.
 
-Message are of the type <T> requested but this is an implicit guarantee since ts-proto does not generate bindings
+Messages are of the type <T> requested but this is an implicit guarantee since ts-proto does not generate bindings
 correctly to reflect this in the returned types.
 
 ---

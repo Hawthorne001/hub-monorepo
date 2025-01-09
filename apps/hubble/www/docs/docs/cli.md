@@ -1,22 +1,22 @@
 # CLI
 
-Documentation for the Hubble CLI. 
+Documentation for the Hubble CLI.
 
 1. `start` - start hubble and configure how it should run
 2. `identity` - generate or validate hub identities
 3. `status` - status reports on sync, storage and other systems.
-4. `dbreset` - clear the database. 
+4. `dbreset` - clear the database.
 5. `profile` - profile the storage usage of the db.
 6. `console` - start an interactive repl console for debugging.
 
-Commands must invoked with yarn by running: 
+Commands must be invoked with yarn by running:
 
 ```
 # if using docker
-docker compose exec hubble yarn <command> 
+docker compose exec hubble yarn <command>
 
 # if not using docker
-yarn <command> 
+yarn <command>
 ```
 
 ### start
@@ -33,6 +33,7 @@ Hubble Options:
   -c, --config <filepath>               Path to the config file.
   --db-name <name>                      The name of the RocksDB instance. (default: rocks.hub._default)
   --process-file-prefix <prefix>        Prefix for file to which hub process number is written. (default: "")
+  --log-individual-messages             Log individual submitMessage status. If disabled, log one line per second (default: disabled)"
 
 Ethereum Options:
   -m, --eth-mainnet-rpc-url <url>       RPC URL of a Mainnet ETH Node (or comma separated list of URLs)
@@ -55,9 +56,17 @@ Snapshots Options:
   --enable-snapshot-to-s3               Enable daily snapshots to be uploaded to S3. (default: disabled)
   --s3-snapshot-bucket <bucket>         The S3 bucket to upload snapshots to
   --disable-snapshot-sync               Disable syncing from snapshots. (default: enabled)
+  --catchup-sync-with-snapshot          Enable catchup sync using S3 snapshot, recommended if Hub is too far behind. (default: disabled)
+  --catchup-sync-snapshot-message-limit <number> Difference in message count before triggering snapshot sync. (default: 3_000_000)
 
 Metrics:
   --statsd-metrics-server <host>        The host to send statsd metrics to, eg "127.0.0.1:8125". (default: disabled)
+
+Diagnostics:
+  --opt-out-diagnostics [boolean]       Opt-out of sending diagnostics data to the Farcaster Foundation.
+                                        Diagnostics are used to troubleshoot user issues and
+                                        improve health of the network. (default: disabled)
+ --diagnostic-report-url <url>          The URL to send diagnostic reports to. (default: https://report.farcaster.xyz)
 
 Networking Options:
   -a, --allowed-peers <peerIds...>      Only peer with specific peer ids. (default: all peers allowed)
@@ -68,6 +77,7 @@ Networking Options:
   --http-cors-origin                    CORS origin for HTTP API (default: *)
   --ip <ip-address>                     IP address to listen on (default: "127.0.0.1")
   --announce-ip <ip-address>            Public IP address announced to peers (default: fetched with external service)
+  --announce-rpc-port <port>            RPC port announced to peers. Useful if using a reverse proxy (default: gRPC port)
   --announce-server-name <name>         Server name announced to peers, useful if SSL/TLS enabled. (default: "none")
   --admin-server-enabled                Enable the admin server. (default: disabled)
   --admin-server-host <host>            The host the admin server should listen on. (default: '127.0.0.1')
@@ -85,16 +95,16 @@ Snapshots Options:
 Metrics:
   --statsd-metrics-server <host>        The host to send statsd metrics to, eg "127.0.0.1:8125". (default: disabled)
 
-Debugging Options:  
+Debugging Options:
   --profile-sync                        Profile a full hub sync and exit. (default: disabled)
-  --rebuild-sync-trie                   Rebuild the sync trie before starting (default: disabled)  
+  --rebuild-sync-trie                   Rebuild the sync trie before starting (default: disabled)
   --resync-name-events                  Resync events from the Fname server before starting (default: disabled)
   --chunk-size <number>                 The number of blocks to batch when syncing historical events from Farcaster contracts. (default: 10000)
   --commit-lock-timeout <number>        Rocks DB commit lock timeout in milliseconds (default: 500)
   --commit-lock-max-pending <number>    Rocks DB commit lock max pending jobs (default: 1000)
   --rpc-auth <username:password,...>    Require username-password auth for RPC submit. (default: disabled)
   --disable-console-status              Immediately log to STDOUT, and disable console status and progressbars. (default: disabled)
-  
+
   -h, --help                            display help for command
   ```
 
@@ -155,4 +165,15 @@ Options:
   -s, --server <url>  Farcaster RPC server address:port to connect to (eg. 127.0.0.1:2283) (default: "127.0.0.1:2283")
   --insecure          Allow insecure connections to the RPC server (default: false)
   -h, --help          display help for command
+```
+
+### snapshot-url
+```
+Usage: hub snapshot-url [options]
+
+Print latest snapshot URL and metadata from S3
+
+Options:
+  -n --network <network>  ID of the Farcaster Network (default: 1 (mainnet))
+  -h, --help              display help for command
 ```

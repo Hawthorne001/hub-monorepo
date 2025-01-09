@@ -7,21 +7,42 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const lib = require("./addon/index.node");
 
-import { HubError, HubErrorCode, validations } from "@farcaster/hub-nodejs";
+import { HubError, HubErrorCode, HubResult, validations } from "@farcaster/hub-nodejs";
 import { PAGE_SIZE_MAX, PageOptions } from "./storage/stores/types.js";
 import { UserMessagePostfix } from "./storage/db/types.js";
 import { DbKeyValue, RocksDbIteratorOptions } from "./storage/db/rocksdb.js";
 import { logger } from "./utils/logger.js";
-import { Result } from "neverthrow";
+import { Result, ResultAsync, err, ok } from "neverthrow";
+import { NodeMetadata, TrieSnapshot } from "network/sync/merkleTrie.js";
 
 // Also set up the log flush listener
 logger.onFlushListener(() => {
   lib.flushLogBuffer();
 });
 
-export class RustDynStore {}
-export class RustDb {}
-export class RustStoreEventHandler {}
+const RustMerkleTrieBrand = Symbol("RustMerkleTrie");
+export class RustMerkleTrie {
+  // @ts-ignore
+  private [RustMerkleTrieBrand]: never;
+}
+
+const RustDynStoreBrand = Symbol("RustDynStore");
+export class RustDynStore {
+  // @ts-ignore
+  private [RustDynStoreBrand]: never;
+}
+
+const RustDbBrand = Symbol("RustDb");
+export class RustDb {
+  // @ts-ignore
+  private [RustDbBrand]: never;
+}
+
+const RustStoreEventHandlerBrand = Symbol("RustStoreEventHandler");
+export class RustStoreEventHandler {
+  // @ts-ignore
+  private [RustStoreEventHandlerBrand]: never;
+}
 
 // Type returned from Rust which is equivalent to the TypeScript type `MessagesPage`
 export class RustMessagesPage {
@@ -69,16 +90,16 @@ export const rsCreateStatsdClient = (host: string, port: number, prefix: string)
   lib.createStatsdClient(host, port, prefix);
 };
 
-/** Create or Open a DB at a give path 
- * 
+/** Create or Open a DB at a give path
+ *
  * All rust objects need to be "owned" by someone so that rust can manage its lifecycle. For rust objects like the
- *  `RocksDb` and the `ReactionStore`, we create them as `JsBox<Arc<T>>`. `JsBox` is like Rust's `Box`, except it is 
- * owned by the Javascript pointer that is returned. That is, 
+ *  `RocksDb` and the `ReactionStore`, we create them as `JsBox<Arc<T>>`. `JsBox` is like Rust's `Box`, except it is
+ * owned by the Javascript pointer that is returned. That is,
     - The DB object is owned by the Javascript object that is returned
-    - When the Javascript object goes out of scope and is gc'd, it is `drop()`-ed in Rust. 
+    - When the Javascript object goes out of scope and is gc'd, it is `drop()`-ed in Rust.
 
-  Since the Rust objects are `Arc<T>` inside a `JsBox`, we can clone them and keep them around in the rust code as we 
-  please, since the Javascript code will continue to own one `Arc<T>`, making sure that it lasts for the lifetime of 
+  Since the Rust objects are `Arc<T>` inside a `JsBox`, we can clone them and keep them around in the rust code as we
+  please, since the Javascript code will continue to own one `Arc<T>`, making sure that it lasts for the lifetime of
   the program.
 */
 export const rsCreateDb = (path: string): RustDb => {
@@ -95,14 +116,6 @@ export const rsApproximateSize = (db: RustDb): number => {
   return lib.dbApproximateSize.call(db);
 };
 
-export const rsCreateTarBackup = (db: RustDb): Promise<string> => {
-  return lib.dbCreateTarBackup.call(db);
-};
-
-export const rsCreateTarGzip = (filePath: string): Promise<string> => {
-  return lib.dbCreateTarGzip(filePath);
-};
-
 export const rsDbClear = (db: RustDb) => {
   return lib.dbClear.call(db);
 };
@@ -117,6 +130,10 @@ export const rsDbDestroy = (db: RustDb) => {
 
 export const rsDbLocation = (db: RustDb): string => {
   return lib.dbLocation.call(db);
+};
+
+export const rsDbKeysExist = async (db: RustDb, keys: Uint8Array[]): Promise<boolean[]> => {
+  return await lib.dbKeysExist.call(db, keys);
 };
 
 export const rsDbGet = async (db: RustDb, key: Uint8Array): Promise<Buffer> => {
@@ -141,9 +158,13 @@ export const rsDbCommit = async (db: RustDb, keyValues: DbKeyValue[]): Promise<v
   return await lib.dbCommit.call(db, keyValues);
 };
 
+export const rsDbSnapshotBackup = async (mainDb: RustDb, trieDb: RustDb, timestamp: number): Promise<string> => {
+  return await lib.dbSnapshotBackup(mainDb, trieDb, timestamp);
+};
+
 /**
- * Rust code needs to be memory-safe, which means that we can't pass around iterators like we do in Javascript. 
- * This is because the `iterator` reference is valid for only as long as the `db` is valid, and the reference is 
+ * Rust code needs to be memory-safe, which means that we can't pass around iterators like we do in Javascript.
+ * This is because the `iterator` reference is valid for only as long as the `db` is valid, and the reference is
  * dropped right after the iterator is finished.
 
   This specifically means that we need to use iterators as callbacks. The way the iterators are set up is:
@@ -153,19 +174,19 @@ export const rsDbCommit = async (db: RustDb, keyValues: DbKeyValue[]): Promise<v
 
   In JS, we can have async functions as callbacks to the `forEachIterator` methods. This means that the callback
   can take arbitrarily long, and that is bad because keeping iterators open for long periods of time is very
-  problematic. Additionally, we can't call async JS methods from rust. To address these both, the iterators are 
-  automatically paged. 
+  problematic. Additionally, we can't call async JS methods from rust. To address these both, the iterators are
+  automatically paged.
 
   That means that when you start an iterator:
   1. JS code will fetch a page full of keys and values from rust
-  2. Close the iterator right after. 
+  2. Close the iterator right after.
   3. Calls the async callbacks with the cached key, value pairs, which can take as long as needed.
-  4. Go back to step 1 to get the next page of key, value pairs. 
+  4. Go back to step 1 to get the next page of key, value pairs.
 
-  This method returns a boolean, which is true if the iteration is finished, and false if it is not. 
+  This method returns a boolean, which is true if the iteration is finished, and false if it is not.
   - If the iteration was stopped because it hit the pageSize, it returns false (i.e., there are more keys available)
   - If the iteration was stopped because the callback returned true, it returns false (i.e., there are more keys available)
-  
+
  */
 export const rsDbForEachIteratorByPrefix = async (
   db: RustDb,
@@ -173,33 +194,18 @@ export const rsDbForEachIteratorByPrefix = async (
   pageOptions: PageOptions,
   cb: (key: Buffer, value: Buffer | undefined) => Promise<boolean> | boolean | Promise<void> | void,
 ): Promise<boolean> => {
-  let dbKeyValues: DbKeyValue[] = [];
-  const batchPageSize = pageOptions.pageSize ?? PAGE_SIZE_MAX;
-
   let allFinished = false;
   let nextPageToken = undefined;
   let stopped = false;
   let batchPageOptions = { ...pageOptions };
 
   do {
-    allFinished = await lib.dbForEachIteratorByPrefix.call(
-      db,
-      prefix,
-      batchPageOptions,
-      (key: Buffer, value: Buffer | undefined) => {
-        dbKeyValues.push({ key, value });
-
-        if (dbKeyValues.length > batchPageSize) {
-          nextPageToken = new Uint8Array(key.subarray(prefix.length));
-          return true; // Stop the iteration
-        }
-
-        return false; // Continue the iteration
-      },
-    );
+    const result = await lib.dbFetchIteratorPageByPrefix.call(db, prefix, batchPageOptions);
+    allFinished = result.allFinished;
+    nextPageToken = result.nextPageToken;
 
     // Iterate over the key-values
-    for (const kv of dbKeyValues) {
+    for (const kv of result.dbKeyValues) {
       const shouldStop = await cb(kv.key, kv.value);
       if (shouldStop) {
         stopped = true;
@@ -208,7 +214,6 @@ export const rsDbForEachIteratorByPrefix = async (
     }
 
     batchPageOptions = { ...pageOptions, pageToken: nextPageToken };
-    dbKeyValues = []; // Clear the key-values array
   } while (!allFinished && !stopped && nextPageToken);
 
   return !stopped && allFinished;
@@ -264,6 +269,14 @@ export const rsDbForEachIteratorByOpts = async (
   return !stopped && allFinished;
 };
 
+export const rsDbCountKeysAtPrefix = async (db: RustDb, prefix: Uint8Array): Promise<number> => {
+  return await lib.dbCountKeysAtPrefix.call(db, prefix);
+};
+
+export const rsDbDeleteAllKeysInRange = async (db: RustDb, iteratorOpts: RocksDbIteratorOptions): Promise<boolean> => {
+  return await lib.dbDeleteAllKeysInRange.call(db, iteratorOpts);
+};
+
 export const rsCreateStoreEventHandler = (
   epoch?: number,
   last_timestamp?: number,
@@ -290,6 +303,58 @@ export const rsCreateReactionStore = (
   return store as RustDynStore;
 };
 
+/** Create a cast Store */
+export const rsCreateCastStore = (
+  db: RustDb,
+  eventHandler: RustStoreEventHandler,
+  pruneSizeLimit: number,
+): RustDynStore => {
+  const store = lib.createCastStore(db, eventHandler, pruneSizeLimit);
+
+  return store as RustDynStore;
+};
+
+export const rsGetCastAdd = async (store: RustDynStore, fid: number, hashBytes: Buffer): Promise<Buffer> => {
+  return await lib.getCastAdd.call(store, fid, hashBytes);
+};
+
+export const rsGetCastRemove = async (store: RustDynStore, fid: number, hashBytes: Buffer): Promise<Buffer> => {
+  return await lib.getCastRemove.call(store, fid, hashBytes);
+};
+
+export const rsGetCastAddsByFid = async (
+  store: RustDynStore,
+  fid: number,
+  pageOptions: PageOptions,
+): Promise<RustMessagesPage> => {
+  return await lib.getCastAddsByFid.call(store, fid, pageOptions);
+};
+
+export const rsGetCastRemovesByFid = async (
+  store: RustDynStore,
+  fid: number,
+  pageOptions: PageOptions,
+): Promise<RustMessagesPage> => {
+  return await lib.getCastRemovesByFid.call(store, fid, pageOptions);
+};
+
+export const rsGetCastsByParent = async (
+  store: RustDynStore,
+  parentCastIdBytes: Buffer,
+  parentUrl: string,
+  pageOptions: PageOptions,
+): Promise<RustMessagesPage> => {
+  return await lib.getCastsByParent.call(store, parentCastIdBytes, parentUrl, pageOptions);
+};
+
+export const rsGetCastsByMention = async (
+  store: RustDynStore,
+  mentionFid: number,
+  pageOptions: PageOptions,
+): Promise<RustMessagesPage> => {
+  return await lib.getCastsByMention.call(store, mentionFid, pageOptions);
+};
+
 export const rsGetMessage = async (
   store: RustDynStore,
   fid: number,
@@ -304,6 +369,38 @@ export const rsMerge = async (store: RustDynStore, messageBytes: Uint8Array): Pr
   return await lib.merge.call(store, messageBytes);
 };
 
+export const rsMergeMany = async (
+  store: RustDynStore,
+  messagesBytes: Uint8Array[],
+): Promise<Map<number, HubResult<Buffer>>> => {
+  // Short-circuit if there are is just one message
+  if (messagesBytes.length === 1) {
+    const result = await ResultAsync.fromPromise(rsMerge(store, messagesBytes[0] as Uint8Array), rustErrorToHubError);
+    return new Map([[0, result]]);
+  }
+
+  const mergeResults: Map<number, HubResult<Buffer>> = new Map();
+
+  const results = await lib.mergeMany.call(store, messagesBytes);
+
+  // Parse the results
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    if (typeof result === "string") {
+      // This was an error
+      mergeResults.set(i, err(rustErrorToHubError(new Error(result))));
+    } else if (result instanceof Buffer) {
+      // This is a Buffer
+      mergeResults.set(i, ok(result));
+    } else {
+      // This is an unknown type
+      mergeResults.set(i, err(new HubError("unknown", `Unknown error in mergeMany: ${result}`)));
+    }
+  }
+
+  return mergeResults;
+};
+
 /** Revoke a message from the store */
 export const revoke = async (store: RustDynStore, messageBytes: Uint8Array): Promise<Buffer> => {
   return await lib.revoke.call(store, messageBytes);
@@ -314,17 +411,19 @@ export const rsPruneMessages = async (
   store: RustDynStore,
   fid: number,
   cachedCount: number,
-  units: number,
+  maxCount: number,
 ): Promise<Buffer> => {
-  return await lib.pruneMessages.call(store, fid, cachedCount, units);
+  return await lib.pruneMessages.call(store, fid, cachedCount, maxCount);
 };
 
 export const rsGetAllMessagesByFid = async (
   store: RustDynStore,
   fid: number,
   pageOptions: PageOptions,
+  startTime?: number,
+  stopTime?: number,
 ): Promise<RustMessagesPage> => {
-  return await lib.getAllMessagesByFid.call(store, fid, pageOptions);
+  return await lib.getAllMessagesByFid.call(store, fid, pageOptions, startTime, stopTime);
 };
 
 export const rsGetReactionAdd = async (
@@ -375,6 +474,7 @@ export const rsGetReactionsByTarget = async (
   return await lib.getReactionsByTarget.call(store, targetCastIdBytes, targetUrl, type, pageOptions);
 };
 
+/** UserData Store */
 export const rsCreateUserDataStore = (
   db: RustDb,
   eventHandler: RustStoreEventHandler,
@@ -393,8 +493,10 @@ export const rsGetUserDataAddsByFid = async (
   store: RustDynStore,
   fid: number,
   pageOptions: PageOptions,
+  startTime?: number,
+  stopTime?: number,
 ): Promise<RustMessagesPage> => {
-  return await lib.getUserDataAddsByFid.call(store, fid, pageOptions);
+  return await lib.getUserDataAddsByFid.call(store, fid, pageOptions, startTime, stopTime);
 };
 
 export const rsGetUserNameProof = async (store: RustDynStore, name: Uint8Array): Promise<Buffer> => {
@@ -407,4 +509,241 @@ export const rsGetUserNameProofByFid = async (store: RustDynStore, fid: number):
 
 export const rsMergeUserNameProof = async (store: RustDynStore, usernameProof: Uint8Array): Promise<Buffer> => {
   return await lib.mergeUserNameProof.call(store, usernameProof);
+};
+
+/** VerificationStore */
+export const rsCreateVerificationStore = (
+  db: RustDb,
+  eventHandler: RustStoreEventHandler,
+  pruneSizeLimit: number,
+): RustDynStore => {
+  const store = lib.createVerificationStore(db, eventHandler, pruneSizeLimit);
+
+  return store as RustDynStore;
+};
+
+export const rsGetVerificationAdd = async (store: RustDynStore, fid: number, address: Uint8Array): Promise<Buffer> => {
+  return await lib.getVerificationAdd.call(store, fid, address);
+};
+
+export const rsGetVerificationRemove = async (
+  store: RustDynStore,
+  fid: number,
+  address: Uint8Array,
+): Promise<Buffer> => {
+  return await lib.getVerificationRemove.call(store, fid, address);
+};
+
+export const rsGetVerificationAddsByFid = async (
+  store: RustDynStore,
+  fid: number,
+  pageOptions: PageOptions,
+): Promise<RustMessagesPage> => {
+  return await lib.getVerificationAddsByFid.call(store, fid, pageOptions);
+};
+
+export const rsGetVerificationRemovesByFid = async (
+  store: RustDynStore,
+  fid: number,
+  pageOptions: PageOptions,
+): Promise<RustMessagesPage> => {
+  return await lib.getVerificationRemovesByFid.call(store, fid, pageOptions);
+};
+
+export const rsMigrateVerifications = async (store: RustDynStore): Promise<{ total: number; duplicates: number }> => {
+  return await lib.migrateVerifications.call(store);
+};
+
+/** Username Proofs store */
+export const rsCreateUsernameProofStore = (
+  db: RustDb,
+  eventHandler: RustStoreEventHandler,
+  pruneSizeLimit: number,
+): RustDynStore => {
+  const store = lib.createUsernameProofStore(db, eventHandler, pruneSizeLimit);
+
+  return store as RustDynStore;
+};
+
+export const rsGetUsernameProof = async (store: RustDynStore, name: Uint8Array, type: number): Promise<Buffer> => {
+  return await lib.getUsernameProof.call(store, name, type);
+};
+
+export const rsGetUsernameProofsByFid = async (
+  store: RustDynStore,
+  fid: number,
+  pageOptions: PageOptions,
+): Promise<RustMessagesPage> => {
+  return await lib.getUsernameProofsByFid.call(store, fid, pageOptions);
+};
+
+export const rsGetUsernameProofByFidAndName = async (
+  store: RustDynStore,
+  fid: number,
+  name: Uint8Array,
+): Promise<Buffer> => {
+  return await lib.getUsernameProofByFidAndName.call(store, fid, name);
+};
+
+export namespace rsLinkStore {
+  export const CreateLinkStore = (
+    db: RustDb,
+    eventHandler: RustStoreEventHandler,
+    pruneSizeLimit: number,
+  ): RustDynStore => {
+    const store = lib.createLinkStore(db, eventHandler, pruneSizeLimit);
+
+    return store as RustDynStore;
+  };
+
+  export const GetLinkAdd = async (store: RustDynStore, fid: number, type: string, target: number): Promise<Buffer> => {
+    return await lib.getLinkAdd.call(store, fid, type, target);
+  };
+
+  export const GetLinkAddsByFid = async (
+    store: RustDynStore,
+    fid: number,
+    type: string,
+    pageOptions: PageOptions,
+  ): Promise<RustMessagesPage> => {
+    return await lib.getLinkAddsByFid.call(store, fid, type, pageOptions);
+  };
+
+  export const GetLinkRemovesByFid = async (
+    store: RustDynStore,
+    fid: number,
+    type: string,
+    pageOptions: PageOptions,
+  ): Promise<RustMessagesPage> => {
+    return await lib.getLinkRemovesByFid.call(store, fid, type, pageOptions);
+  };
+
+  export const GetLinksByTarget = async (
+    store: RustDynStore,
+    target: number,
+    type: string,
+    pageOptions: PageOptions,
+  ): Promise<RustMessagesPage> => {
+    return await lib.getLinksByTarget.call(store, target, type, pageOptions);
+  };
+
+  export const GetLinkRemove = async (
+    store: RustDynStore,
+    fid: number,
+    type: string,
+    target: number,
+  ): Promise<Buffer> => {
+    return await lib.getLinkRemove.call(store, fid, type, target);
+  };
+
+  export const GetLinkCompactStateMessageByFid = async (
+    store: RustDynStore,
+    fid: number,
+    pageOptions: PageOptions,
+  ): Promise<RustMessagesPage> => {
+    return await lib.getLinkCompactStateMessageByFid.call(store, fid, pageOptions);
+  };
+}
+
+/**
+ * Merkle Trie Functions
+ */
+export const rsCreateMerkleTrie = (dbPath: string): RustMerkleTrie => {
+  const trie = lib.createMerkleTrie(dbPath);
+  return trie as RustMerkleTrie;
+};
+
+export const rsCreateMerkleTrieFromDb = (db: RustDb): RustMerkleTrie => {
+  const trie = lib.createMerkleTrieFromDb(db);
+  return trie as RustMerkleTrie;
+};
+
+export const rsMerkleTrieGetDb = (trie: RustMerkleTrie): RustDb => {
+  return lib.merkleTrieGetDb.call(trie) as RustDb;
+};
+
+export const rsMerkleTrieInitialize = async (trie: RustMerkleTrie): Promise<void> => {
+  return await lib.merkleTrieInitialize.call(trie);
+};
+
+export const rsMerkleTrieClear = async (trie: RustMerkleTrie): Promise<void> => {
+  return await lib.merkleTrieClear.call(trie);
+};
+
+export const rsMerkleTrieStop = async (trie: RustMerkleTrie): Promise<void> => {
+  await lib.merkleTrieStop.call(trie);
+};
+
+export const rsMerkleTrieBatchUpdate = async (
+  trie: RustMerkleTrie,
+  inserts: Uint8Array[],
+  deletes: Uint8Array[],
+): Promise<boolean[]> => {
+  return await lib.merkleTrieBatchUpdate.call(trie, inserts, deletes);
+};
+
+export const rsMerkleTrieInsert = async (trie: RustMerkleTrie, key: Uint8Array): Promise<boolean> => {
+  return await lib.merkleTrieInsert.call(trie, key);
+};
+
+export const rsMerkleTrieDelete = async (trie: RustMerkleTrie, key: Uint8Array): Promise<boolean> => {
+  return await lib.merkleTrieDelete.call(trie, key);
+};
+
+export const rsMerkleTrieExists = async (trie: RustMerkleTrie, key: Uint8Array): Promise<boolean> => {
+  return await lib.merkleTrieExists.call(trie, key);
+};
+
+export const rsMerkleTrieGetSnapshot = async (trie: RustMerkleTrie, prefix: Uint8Array): Promise<TrieSnapshot> => {
+  const snapshot = (await lib.merkleTrieGetSnapshot.call(trie, prefix)) as TrieSnapshot;
+  return {
+    prefix: new Uint8Array(snapshot.prefix),
+    excludedHashes: snapshot.excludedHashes,
+    numMessages: snapshot.numMessages,
+  };
+};
+
+export const rsMerkleTrieGetTrieNodeMetadata = async (
+  trie: RustMerkleTrie,
+  prefix: Uint8Array,
+): Promise<NodeMetadata | undefined> => {
+  try {
+    const metadata = await lib.merkleTrieGetTrieNodeMetadata.call(trie, prefix);
+
+    // The returned metadata has a childrenKeys and childrenValues, which need to be turned into a Map
+    const children = new Map<number, NodeMetadata>();
+    for (let i = 0; i < metadata.childrenKeys.length; i++) {
+      children.set(metadata.childrenKeys[i], metadata.childrenValues[i]);
+    }
+
+    return {
+      numMessages: metadata.numMessages,
+      hash: metadata.hash,
+      prefix: new Uint8Array(metadata.prefix),
+      children,
+    };
+  } catch (err) {
+    const e = err as HubError;
+    if (e.message.includes("Node not found")) {
+      return undefined;
+    } else {
+      throw err;
+    }
+  }
+};
+
+export const rsMerkleTrieGetAllValues = async (trie: RustMerkleTrie, prefix: Uint8Array): Promise<Uint8Array[]> => {
+  return await lib.merkleTrieGetAllValues.call(trie, prefix);
+};
+
+export const rsMerkleTrieItems = async (trie: RustMerkleTrie): Promise<number> => {
+  return await lib.merkleTrieItems.call(trie);
+};
+
+export const rsMerkleTrieRootHash = async (trie: RustMerkleTrie): Promise<string> => {
+  return Buffer.from(await lib.merkleTrieRootHash.call(trie)).toString("hex");
+};
+
+export const rsMerkleTrieUnloadChildren = async (trie: RustMerkleTrie): Promise<void> => {
+  return await lib.merkleTrieUnloadChildren.call(trie);
 };

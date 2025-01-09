@@ -1,11 +1,8 @@
 import { performance } from "node:perf_hooks";
 import { Writable } from "node:stream";
 import v8 from "v8";
-
 import ProgressBar from "progress";
-
 import { MerkleTrie } from "../../network/sync/merkleTrie.js";
-
 import RocksDB from "../../storage/db/rocksdb.js";
 import { generateSyncIds } from "./helpers.js";
 import { yieldToEventLoop } from "./utils.js";
@@ -52,10 +49,11 @@ export const benchMerkleTrie = async ({
   });
 
   const syncIds = generateSyncIds(count, 100_000, 300);
-  const db = new RocksDB("protobufs.bench.merkleTrie");
+  const db = new RocksDB("protobufs.bench.merkleTrie.test");
   await db.open();
 
   const trie = new MerkleTrie(db);
+  await trie.initialize();
 
   let i = 0;
   progress.tick(0);
@@ -75,10 +73,9 @@ export const benchMerkleTrie = async ({
 
   while (i < syncIds.length) {
     let start = performance.now();
-    for (let j = 0; j < cycle; j++) {
-      // biome-ignore lint/style/noNonNullAssertion: legacy code, avoid using ignore for new code
-      await trie.insert(syncIds[(i + j) % syncIds.length]!);
-    }
+    await trie.insertBatch(syncIds.slice(i, i + cycle));
+
+    await trie.commitToDb();
     const insertDuration = performance.now() - start;
 
     i += cycle;

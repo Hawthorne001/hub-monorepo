@@ -101,6 +101,8 @@ export enum MessageType {
   USERNAME_PROOF = 12,
   /** FRAME_ACTION - A Farcaster Frame action */
   FRAME_ACTION = 13,
+  /** LINK_COMPACT_STATE - Link Compaction State Message */
+  LINK_COMPACT_STATE = 14,
 }
 
 export function messageTypeFromJSON(object: any): MessageType {
@@ -141,6 +143,9 @@ export function messageTypeFromJSON(object: any): MessageType {
     case 13:
     case "MESSAGE_TYPE_FRAME_ACTION":
       return MessageType.FRAME_ACTION;
+    case 14:
+    case "MESSAGE_TYPE_LINK_COMPACT_STATE":
+      return MessageType.LINK_COMPACT_STATE;
     default:
       throw new tsProtoGlobalThis.Error("Unrecognized enum value " + object + " for enum MessageType");
   }
@@ -172,6 +177,8 @@ export function messageTypeToJSON(object: MessageType): string {
       return "MESSAGE_TYPE_USERNAME_PROOF";
     case MessageType.FRAME_ACTION:
       return "MESSAGE_TYPE_FRAME_ACTION";
+    case MessageType.LINK_COMPACT_STATE:
+      return "MESSAGE_TYPE_LINK_COMPACT_STATE";
     default:
       throw new tsProtoGlobalThis.Error("Unrecognized enum value " + object + " for enum MessageType");
   }
@@ -235,6 +242,12 @@ export enum UserDataType {
   URL = 5,
   /** USERNAME - Preferred Name for the user */
   USERNAME = 6,
+  /** LOCATION - Current location for the user */
+  LOCATION = 7,
+  /** TWITTER - Username of user on twitter */
+  TWITTER = 8,
+  /** GITHUB - Username of user on github */
+  GITHUB = 9,
 }
 
 export function userDataTypeFromJSON(object: any): UserDataType {
@@ -257,6 +270,15 @@ export function userDataTypeFromJSON(object: any): UserDataType {
     case 6:
     case "USER_DATA_TYPE_USERNAME":
       return UserDataType.USERNAME;
+    case 7:
+    case "USER_DATA_TYPE_LOCATION":
+      return UserDataType.LOCATION;
+    case 8:
+    case "USER_DATA_TYPE_TWITTER":
+      return UserDataType.TWITTER;
+    case 9:
+    case "USER_DATA_TYPE_GITHUB":
+      return UserDataType.GITHUB;
     default:
       throw new tsProtoGlobalThis.Error("Unrecognized enum value " + object + " for enum UserDataType");
   }
@@ -276,8 +298,44 @@ export function userDataTypeToJSON(object: UserDataType): string {
       return "USER_DATA_TYPE_URL";
     case UserDataType.USERNAME:
       return "USER_DATA_TYPE_USERNAME";
+    case UserDataType.LOCATION:
+      return "USER_DATA_TYPE_LOCATION";
+    case UserDataType.TWITTER:
+      return "USER_DATA_TYPE_TWITTER";
+    case UserDataType.GITHUB:
+      return "USER_DATA_TYPE_GITHUB";
     default:
       throw new tsProtoGlobalThis.Error("Unrecognized enum value " + object + " for enum UserDataType");
+  }
+}
+
+/** Type of cast */
+export enum CastType {
+  CAST = 0,
+  LONG_CAST = 1,
+}
+
+export function castTypeFromJSON(object: any): CastType {
+  switch (object) {
+    case 0:
+    case "CAST":
+      return CastType.CAST;
+    case 1:
+    case "LONG_CAST":
+      return CastType.LONG_CAST;
+    default:
+      throw new tsProtoGlobalThis.Error("Unrecognized enum value " + object + " for enum CastType");
+  }
+}
+
+export function castTypeToJSON(object: CastType): string {
+  switch (object) {
+    case CastType.CAST:
+      return "CAST";
+    case CastType.LONG_CAST:
+      return "LONG_CAST";
+    default:
+      throw new tsProtoGlobalThis.Error("Unrecognized enum value " + object + " for enum CastType");
   }
 }
 
@@ -399,7 +457,11 @@ export interface MessageData {
   /** SignerRemoveBody signer_remove_body = 13; // Deprecated */
   linkBody?: LinkBody | undefined;
   usernameProofBody?: UserNameProof | undefined;
-  frameActionBody?: FrameActionBody | undefined;
+  frameActionBody?:
+    | FrameActionBody
+    | undefined;
+  /** Compaction messages */
+  linkCompactStateBody?: LinkCompactStateBody | undefined;
 }
 
 /** Adds metadata about a user */
@@ -435,6 +497,8 @@ export interface CastAddBody {
   mentionsPositions: number[];
   /** URLs or cast ids to be embedded in the cast */
   embeds: Embed[];
+  /** Type of cast */
+  type: CastType;
 }
 
 /** Removes an existing Cast */
@@ -497,6 +561,13 @@ export interface LinkBody {
     | undefined;
   /** The fid the link relates to */
   targetFid?: number | undefined;
+}
+
+/** A Compaction message for the Link Store */
+export interface LinkCompactStateBody {
+  /** Type of link, <= 8 characters */
+  type: string;
+  targetFids: number[];
 }
 
 /** A Farcaster Frame action */
@@ -684,6 +755,7 @@ function createBaseMessageData(): MessageData {
     linkBody: undefined,
     usernameProofBody: undefined,
     frameActionBody: undefined,
+    linkCompactStateBody: undefined,
   };
 }
 
@@ -727,6 +799,9 @@ export const MessageData = {
     }
     if (message.frameActionBody !== undefined) {
       FrameActionBody.encode(message.frameActionBody, writer.uint32(130).fork()).ldelim();
+    }
+    if (message.linkCompactStateBody !== undefined) {
+      LinkCompactStateBody.encode(message.linkCompactStateBody, writer.uint32(138).fork()).ldelim();
     }
     return writer;
   },
@@ -829,6 +904,13 @@ export const MessageData = {
 
           message.frameActionBody = FrameActionBody.decode(reader, reader.uint32());
           continue;
+        case 17:
+          if (tag != 138) {
+            break;
+          }
+
+          message.linkCompactStateBody = LinkCompactStateBody.decode(reader, reader.uint32());
+          continue;
       }
       if ((tag & 7) == 4 || tag == 0) {
         break;
@@ -857,6 +939,9 @@ export const MessageData = {
       linkBody: isSet(object.linkBody) ? LinkBody.fromJSON(object.linkBody) : undefined,
       usernameProofBody: isSet(object.usernameProofBody) ? UserNameProof.fromJSON(object.usernameProofBody) : undefined,
       frameActionBody: isSet(object.frameActionBody) ? FrameActionBody.fromJSON(object.frameActionBody) : undefined,
+      linkCompactStateBody: isSet(object.linkCompactStateBody)
+        ? LinkCompactStateBody.fromJSON(object.linkCompactStateBody)
+        : undefined,
     };
   },
 
@@ -886,6 +971,9 @@ export const MessageData = {
       (obj.usernameProofBody = message.usernameProofBody ? UserNameProof.toJSON(message.usernameProofBody) : undefined);
     message.frameActionBody !== undefined &&
       (obj.frameActionBody = message.frameActionBody ? FrameActionBody.toJSON(message.frameActionBody) : undefined);
+    message.linkCompactStateBody !== undefined && (obj.linkCompactStateBody = message.linkCompactStateBody
+      ? LinkCompactStateBody.toJSON(message.linkCompactStateBody)
+      : undefined);
     return obj;
   },
 
@@ -927,6 +1015,9 @@ export const MessageData = {
       : undefined;
     message.frameActionBody = (object.frameActionBody !== undefined && object.frameActionBody !== null)
       ? FrameActionBody.fromPartial(object.frameActionBody)
+      : undefined;
+    message.linkCompactStateBody = (object.linkCompactStateBody !== undefined && object.linkCompactStateBody !== null)
+      ? LinkCompactStateBody.fromPartial(object.linkCompactStateBody)
       : undefined;
     return message;
   },
@@ -1085,6 +1176,7 @@ function createBaseCastAddBody(): CastAddBody {
     text: "",
     mentionsPositions: [],
     embeds: [],
+    type: 0,
   };
 }
 
@@ -1114,6 +1206,9 @@ export const CastAddBody = {
     writer.ldelim();
     for (const v of message.embeds) {
       Embed.encode(v!, writer.uint32(50).fork()).ldelim();
+    }
+    if (message.type !== 0) {
+      writer.uint32(64).int32(message.type);
     }
     return writer;
   },
@@ -1192,6 +1287,13 @@ export const CastAddBody = {
 
           message.embeds.push(Embed.decode(reader, reader.uint32()));
           continue;
+        case 8:
+          if (tag != 64) {
+            break;
+          }
+
+          message.type = reader.int32() as any;
+          continue;
       }
       if ((tag & 7) == 4 || tag == 0) {
         break;
@@ -1214,6 +1316,7 @@ export const CastAddBody = {
         ? object.mentionsPositions.map((e: any) => Number(e))
         : [],
       embeds: Array.isArray(object?.embeds) ? object.embeds.map((e: any) => Embed.fromJSON(e)) : [],
+      type: isSet(object.type) ? castTypeFromJSON(object.type) : 0,
     };
   },
 
@@ -1243,6 +1346,7 @@ export const CastAddBody = {
     } else {
       obj.embeds = [];
     }
+    message.type !== undefined && (obj.type = castTypeToJSON(message.type));
     return obj;
   },
 
@@ -1261,6 +1365,7 @@ export const CastAddBody = {
     message.text = object.text ?? "";
     message.mentionsPositions = object.mentionsPositions?.map((e) => e) || [];
     message.embeds = object.embeds?.map((e) => Embed.fromPartial(e)) || [];
+    message.type = object.type ?? 0;
     return message;
   },
 };
@@ -1768,6 +1873,92 @@ export const LinkBody = {
     message.type = object.type ?? "";
     message.displayTimestamp = object.displayTimestamp ?? undefined;
     message.targetFid = object.targetFid ?? undefined;
+    return message;
+  },
+};
+
+function createBaseLinkCompactStateBody(): LinkCompactStateBody {
+  return { type: "", targetFids: [] };
+}
+
+export const LinkCompactStateBody = {
+  encode(message: LinkCompactStateBody, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    if (message.type !== "") {
+      writer.uint32(10).string(message.type);
+    }
+    writer.uint32(18).fork();
+    for (const v of message.targetFids) {
+      writer.uint64(v);
+    }
+    writer.ldelim();
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): LinkCompactStateBody {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLinkCompactStateBody();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag != 10) {
+            break;
+          }
+
+          message.type = reader.string();
+          continue;
+        case 2:
+          if (tag == 16) {
+            message.targetFids.push(longToNumber(reader.uint64() as Long));
+            continue;
+          }
+
+          if (tag == 18) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.targetFids.push(longToNumber(reader.uint64() as Long));
+            }
+
+            continue;
+          }
+
+          break;
+      }
+      if ((tag & 7) == 4 || tag == 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): LinkCompactStateBody {
+    return {
+      type: isSet(object.type) ? String(object.type) : "",
+      targetFids: Array.isArray(object?.targetFids) ? object.targetFids.map((e: any) => Number(e)) : [],
+    };
+  },
+
+  toJSON(message: LinkCompactStateBody): unknown {
+    const obj: any = {};
+    message.type !== undefined && (obj.type = message.type);
+    if (message.targetFids) {
+      obj.targetFids = message.targetFids.map((e) => Math.round(e));
+    } else {
+      obj.targetFids = [];
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<LinkCompactStateBody>, I>>(base?: I): LinkCompactStateBody {
+    return LinkCompactStateBody.fromPartial(base ?? {});
+  },
+
+  fromPartial<I extends Exact<DeepPartial<LinkCompactStateBody>, I>>(object: I): LinkCompactStateBody {
+    const message = createBaseLinkCompactStateBody();
+    message.type = object.type ?? "";
+    message.targetFids = object.targetFids?.map((e) => e) || [];
     return message;
   },
 };

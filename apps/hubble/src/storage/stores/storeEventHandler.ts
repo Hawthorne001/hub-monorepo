@@ -1,6 +1,6 @@
 import {
   bytesIncrement,
-  FARCASTER_EPOCH,
+  getStoreLimit,
   HubAsyncResult,
   HubError,
   HubEvent,
@@ -11,11 +11,13 @@ import {
   isMergeUsernameProofHubEvent,
   isPruneMessageHubEvent,
   isRevokeMessageHubEvent,
+  makeEventId,
   MergeMessageHubEvent,
   MergeOnChainEventHubEvent,
   MergeUsernameProofHubEvent,
   PruneMessageHubEvent,
   RevokeMessageHubEvent,
+  StorageUnitType,
   StoreType,
 } from "@farcaster/hub-nodejs";
 import AsyncLock from "async-lock";
@@ -23,13 +25,12 @@ import { err, ok, ResultAsync } from "neverthrow";
 import { TypedEmitter } from "tiny-typed-emitter";
 import RocksDB, { RocksDbIteratorOptions, RocksDbTransaction } from "../db/rocksdb.js";
 import { RootPrefix, UserMessagePostfix, UserPostfix } from "../db/types.js";
-import { StorageCache } from "./storageCache.js";
+import { StorageCache, StorageSlot } from "./storageCache.js";
 import { makeTsHash, unpackTsHash } from "../db/message.js";
 import {
   bytesCompare,
   CastAddMessage,
   CastRemoveMessage,
-  getFarcasterTime,
   LinkAddMessage,
   LinkRemoveMessage,
   ReactionAddMessage,
@@ -53,6 +54,16 @@ const STORE_TO_SET: Record<StoreType, UserMessagePostfix> = {
   [StoreType.USER_DATA]: UserPostfix.UserDataMessage,
   [StoreType.VERIFICATIONS]: UserPostfix.VerificationMessage,
   [StoreType.USERNAME_PROOFS]: UserPostfix.UsernameProofMessage,
+};
+
+// @ts-ignore
+const SET_TO_STORE: Record<UserMessagePostfix, StoreType> = {
+  [UserPostfix.CastMessage]: StoreType.CASTS,
+  [UserPostfix.LinkMessage]: StoreType.LINKS,
+  [UserPostfix.ReactionMessage]: StoreType.REACTIONS,
+  [UserPostfix.UserDataMessage]: StoreType.USER_DATA,
+  [UserPostfix.VerificationMessage]: StoreType.VERIFICATIONS,
+  [UserPostfix.UsernameProofMessage]: StoreType.USERNAME_PROOFS,
 };
 
 type PrunableMessage =
@@ -108,22 +119,6 @@ export type StoreEvents = {
 
 export type HubEventArgs = Omit<HubEvent, "id">;
 
-// Chosen to keep number under Number.MAX_SAFE_INTEGER
-const TIMESTAMP_BITS = 41;
-const SEQUENCE_BITS = 12;
-
-const makeEventId = (timestamp: number, seq: number): number => {
-  const binaryTimestamp = timestamp.toString(2);
-  let binarySeq = seq.toString(2);
-  if (binarySeq.length) {
-    while (binarySeq.length < SEQUENCE_BITS) {
-      binarySeq = `0${binarySeq}`;
-    }
-  }
-
-  return parseInt(binaryTimestamp + binarySeq, 2);
-};
-
 const makeEventKey = (id?: number): Buffer => {
   const buffer = Buffer.alloc(1 + (id ? 8 : 0));
   buffer.writeUint8(RootPrefix.HubEvents, 0);
@@ -137,6 +132,22 @@ const putEventTransaction = (txn: RocksDbTransaction, event: HubEvent): RocksDbT
   const key = makeEventKey(event.id);
   const value = Buffer.from(HubEvent.encode(event).finish());
   return txn.put(key, value);
+};
+
+export const fidFromEvent = (event: HubEvent): number => {
+  if (isMergeMessageHubEvent(event)) {
+    return event.mergeMessageBody.message.data?.fid || 0;
+  } else if (isMergeOnChainHubEvent(event)) {
+    return event.mergeOnChainEventBody.onChainEvent.fid || 0;
+  } else if (isMergeUsernameProofHubEvent(event)) {
+    return event.mergeUsernameProofBody.usernameProof?.fid || 0;
+  } else if (isPruneMessageHubEvent(event)) {
+    return event.pruneMessageBody.message.data?.fid || 0;
+  } else if (isRevokeMessageHubEvent(event)) {
+    return event.revokeMessageBody.message.data?.fid || 0;
+  } else {
+    throw new Error("invalid hub event type for determining fid");
+  }
 };
 
 export type StoreEventHandlerOptions = {
@@ -173,16 +184,14 @@ class StoreEventHandler extends TypedEmitter<StoreEvents> {
     return this._rustStoreEventHandler;
   }
 
-  async getCurrentStorageUnitsForFid(fid: number): HubAsyncResult<number> {
-    const units = await this._storageCache.getCurrentStorageUnitsForFid(fid);
+  async getCurrentStorageSlotForFid(fid: number): HubAsyncResult<StorageSlot> {
+    const slot = await this._storageCache.getCurrentStorageSlotForFid(fid);
 
-    if (units.isOk() && units.value === 0) {
+    if (slot.isOk() && slot.value.legacy_units + slot.value.units === 0) {
       logger.debug({ fid }, "fid has no registered storage, would be pruned");
     }
 
-    return units.map((u) => {
-      return u;
-    });
+    return slot;
   }
 
   async getUsage(fid: number, store: StoreType): HubAsyncResult<StoreUsage> {
@@ -215,15 +224,34 @@ class StoreEventHandler extends TypedEmitter<StoreEvents> {
   }
 
   async getCacheMessageCount(fid: number, set: UserMessagePostfix, forceFetch = true): HubAsyncResult<number> {
-    return this._storageCache.getMessageCount(fid, set, forceFetch);
+    return await this._storageCache.getMessageCount(fid, set, forceFetch);
+  }
+
+  async getMaxMessageCount(fid: number, set: UserMessagePostfix): HubAsyncResult<number> {
+    const slot = await this.getCurrentStorageSlotForFid(fid);
+
+    if (slot.isErr()) {
+      return err(slot.error);
+    }
+
+    const storeType = SET_TO_STORE[set];
+    if (!storeType) {
+      return err(new HubError("bad_request.invalid_param", `invalid store type ${set}`));
+    }
+    return ok(
+      getStoreLimit(storeType, [
+        { unitType: StorageUnitType.UNIT_TYPE_LEGACY, unitSize: slot.value.legacy_units },
+        { unitType: StorageUnitType.UNIT_TYPE_2024, unitSize: slot.value.units },
+      ]),
+    );
   }
 
   async getEarliestTsHash(fid: number, set: UserMessagePostfix): HubAsyncResult<Uint8Array | undefined> {
-    return this._storageCache.getEarliestTsHash(fid, set);
+    return await this._storageCache.getEarliestTsHash(fid, set);
   }
 
   async syncCache(): HubAsyncResult<void> {
-    return ResultAsync.fromPromise(this._storageCache.syncFromDb(), (e) => e as HubError);
+    return await ResultAsync.fromPromise(this._storageCache.syncFromDb(), (e) => e as HubError);
   }
 
   async getEvent(id: number): HubAsyncResult<HubEvent> {
@@ -292,18 +320,22 @@ class StoreEventHandler extends TypedEmitter<StoreEvents> {
     set: UserMessagePostfix,
     sizeLimit: number,
   ): HubAsyncResult<boolean> {
-    const units = await this.getCurrentStorageUnitsForFid(message.data.fid);
-
-    if (units.isErr()) {
-      return err(units.error);
-    }
-
     const messageCount = await this.getCacheMessageCount(message.data.fid, set);
     if (messageCount.isErr()) {
       return err(messageCount.error);
     }
 
-    if (messageCount.value < sizeLimit * units.value) {
+    const maxMessageCount = await this.getMaxMessageCount(message.data.fid, set);
+    if (maxMessageCount.isErr()) {
+      return err(maxMessageCount.error);
+    }
+
+    let maxCount = maxMessageCount.value;
+    if (sizeLimit > 0 && sizeLimit < maxCount) {
+      maxCount = sizeLimit;
+    }
+
+    if (messageCount.value < maxCount) {
       return ok(false);
     }
 
@@ -349,14 +381,14 @@ class StoreEventHandler extends TypedEmitter<StoreEvents> {
       });
   }
 
-  async processRustCommitedTransaction(event: HubEvent): HubAsyncResult<void> {
+  async processRustCommittedTransaction(event: HubEvent): HubAsyncResult<void> {
     void this._storageCache.processEvent(event);
     void this.broadcastEvent(event);
     return ok(undefined);
   }
 
   async pruneEvents(timeLimit?: number): HubAsyncResult<void> {
-    const toId = makeEventId(Date.now() - FARCASTER_EPOCH - (timeLimit ?? PRUNE_TIME_LIMIT_DEFAULT), 0);
+    const toId = makeEventId(Date.now() - (timeLimit ?? PRUNE_TIME_LIMIT_DEFAULT), 0);
 
     const iteratorOpts = this.getEventsIteratorOpts({ toId });
 
@@ -364,21 +396,12 @@ class StoreEventHandler extends TypedEmitter<StoreEvents> {
       return err(iteratorOpts.error);
     }
 
-    let error: HubError | undefined;
-    await this._db.forEachIteratorByOpts(iteratorOpts.value, async (key, _value) => {
-      const result = await ResultAsync.fromPromise(this._db.del(key as Buffer), (e) => e as HubError);
-      if (result.isErr()) {
-        error = result.error;
-        return true; // stop iteration
-      }
-      return false;
-    });
+    const result = await ResultAsync.fromPromise(
+      this._db.deleteAllKeysInRange(iteratorOpts.value),
+      (e) => e as HubError,
+    );
 
-    if (error) {
-      return err(error);
-    } else {
-      return ok(undefined);
-    }
+    return result.map((_) => {});
   }
 
   private broadcastEvent(event: HubEvent): HubResult<void> {

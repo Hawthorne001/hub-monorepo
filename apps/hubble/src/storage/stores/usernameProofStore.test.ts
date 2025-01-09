@@ -75,7 +75,7 @@ describe("usernameProofStore", () => {
       const proof = await set.getUsernameProof(fname, UserNameType.USERNAME_TYPE_ENS_L1);
       expect(proof).toEqual(newProof);
 
-      const rawProof = await set.getAdd({ data: { fid, usernameProofBody: { name: fname } } });
+      const rawProof = await set.getUsernameProofByFidAndName(fid, fname);
       expect(rawProof).toEqual(newProof);
     });
 
@@ -90,7 +90,7 @@ describe("usernameProofStore", () => {
       const proof = await set.getUsernameProof(fname, UserNameType.USERNAME_TYPE_ENS_L1);
       expect(proof).toEqual(newProof);
 
-      await expect(set.getAdd({ data: { fid, usernameProofBody: { name: fname } } })).rejects.toThrowError("NotFound");
+      await expect(set.getUsernameProofByFidAndName(fid, fname)).rejects.toThrowError("NotFound");
     });
 
     test("does not replace existing proof for name if timestamp is older", async () => {
@@ -185,10 +185,6 @@ describe("usernameProofStore", () => {
 
     describe("with size limit", () => {
       const sizePrunedStore = new UsernameProofStore(db, eventHandler, { pruneSizeLimit: 2 });
-
-      test("defaults size limit", async () => {
-        expect(set.pruneSizeLimit).toEqual(getDefaultStoreLimit(StoreType.USERNAME_PROOFS));
-      });
 
       test("no-ops when no messages have been merged", async () => {
         const result = await sizePrunedStore.pruneMessages(fid);

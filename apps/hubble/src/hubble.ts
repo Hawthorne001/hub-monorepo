@@ -1,36 +1,38 @@
 import {
+  bytesToHexString,
+  bytesToUtf8String,
+  ClientOptions,
   ContactInfoContent,
   ContactInfoContentBody,
   FarcasterNetwork,
+  fromFarcasterTime,
+  getInsecureHubRpcClient,
+  getSSLHubRpcClient,
   GossipAddressInfo,
   GossipMessage,
-  HubState,
-  Message,
+  HashScheme,
   HubAsyncResult,
   HubError,
-  bytesToHexString,
-  bytesToUtf8String,
   HubRpcClient,
-  getSSLHubRpcClient,
-  getInsecureHubRpcClient,
-  UserNameProof,
+  HubState,
+  Message,
   OnChainEvent,
   onChainEventTypeToJSON,
-  ClientOptions,
+  UserNameProof,
   validations,
-  HashScheme,
 } from "@farcaster/hub-nodejs";
-import { PeerId } from "@libp2p/interface-peer-id";
+import { ClientOptions as StatsDClientOptions } from "@figma/hot-shots";
+import { Ed25519PeerId, PeerId, RSAPeerId, Secp256k1PeerId } from "@libp2p/interface";
 import { peerIdFromBytes, peerIdFromString } from "@libp2p/peer-id";
 import { publicAddressesFirst } from "@libp2p/utils/address-sort";
 import { unmarshalPrivateKey, unmarshalPublicKey } from "@libp2p/crypto/keys";
 import { Multiaddr, multiaddr } from "@multiformats/multiaddr";
-import { Result, ResultAsync, err, ok } from "neverthrow";
-import { GossipNode, MAX_MESSAGE_QUEUE_SIZE, GOSSIP_SEEN_TTL } from "./network/p2p/gossipNode.js";
+import { err, ok, Result, ResultAsync } from "neverthrow";
+import { GOSSIP_SEEN_TTL, GossipNode, MAX_SYNCTRIE_QUEUE_SIZE } from "./network/p2p/gossipNode.js";
 import { PeriodicSyncJobScheduler } from "./network/sync/periodicSyncJob.js";
-import SyncEngine from "./network/sync/syncEngine.js";
+import SyncEngine, { FIRST_SYNC_DELAY } from "./network/sync/syncEngine.js";
 import AdminServer from "./rpc/adminServer.js";
-import Server from "./rpc/server.js";
+import Server, { checkPortAndPublicAddress, DEFAULT_SERVER_INTERNET_ADDRESS_IPV4 } from "./rpc/server.js";
 import { getHubState, putHubState } from "./storage/db/hubState.js";
 import RocksDB from "./storage/db/rocksdb.js";
 import { RootPrefix } from "./storage/db/types.js";
@@ -38,10 +40,19 @@ import Engine from "./storage/engine/index.js";
 import { PruneEventsJobScheduler } from "./storage/jobs/pruneEventsJob.js";
 import { PruneMessagesJobScheduler } from "./storage/jobs/pruneMessagesJob.js";
 import { sleep } from "./utils/crypto.js";
-import { rsCreateTarBackup, rsCreateTarGzip, rsValidationMethods, rustErrorToHubError } from "./rustfunctions.js";
+import { rsDbDestroy, rsValidationMethods } from "./rustfunctions.js";
+import { URL } from "node:url";
 import * as tar from "tar";
 import * as zlib from "zlib";
-import { logger, messageToLog, messageTypeToName, onChainEventToLog, usernameProofToLog } from "./utils/logger.js";
+import {
+  logger,
+  messageToLog,
+  messageTypeToName,
+  onChainEventToLog,
+  SubmitMessageSuccessLogCache,
+  usernameProofToLog,
+  Tags,
+} from "./utils/logger.js";
 import {
   addressInfoFromGossip,
   addressInfoToString,
@@ -49,6 +60,7 @@ import {
   ipFamilyToString,
   p2pMultiAddrStr,
 } from "./utils/p2p.js";
+import { fetchSnapshotMetadata, SnapshotMetadata, snapshotURL } from "./utils/snapshot.js";
 import { PeriodicTestDataJobScheduler, TestUser } from "./utils/periodicTestDataJob.js";
 import { ensureAboveMinFarcasterVersion, getMinFarcasterVersion, VersionSchedule } from "./utils/versions.js";
 import { CheckFarcasterVersionJobScheduler } from "./storage/jobs/checkFarcasterVersionJob.js";
@@ -58,21 +70,19 @@ import StoreEventHandler from "./storage/stores/storeEventHandler.js";
 import { FNameRegistryClient, FNameRegistryEventsProvider } from "./eth/fnameRegistryEventsProvider.js";
 import { L2EventsProvider, OptimismConstants } from "./eth/l2EventsProvider.js";
 import { prettyPrintTable } from "./profile/profile.js";
-import packageJson from "./package.json" assert { type: "json" };
-import { createPublicClient, fallback, http } from "viem";
+import { createPublicClient, fallback, http, type PublicClient } from "viem";
 import { mainnet, optimism } from "viem/chains";
 import { AddrInfo } from "@chainsafe/libp2p-gossipsub/types";
 import { CheckIncomingPortsJobScheduler } from "./storage/jobs/checkIncomingPortsJob.js";
-import { NetworkConfig, applyNetworkConfig, fetchNetworkConfig } from "./network/utils/networkConfig.js";
+import { applyNetworkConfig, fetchNetworkConfig, NetworkConfig } from "./network/utils/networkConfig.js";
 import { UpdateNetworkConfigJobScheduler } from "./storage/jobs/updateNetworkConfigJob.js";
-import { statsd, StatsDInitParams } from "./utils/statsd.js";
+import { DbSnapshotBackupJobScheduler } from "./storage/jobs/dbSnapshotBackupJob.js";
+import { statsd } from "./utils/statsd.js";
 import {
   getDbSchemaVersion,
   LATEST_DB_SCHEMA_VERSION,
   performDbMigrations,
 } from "./storage/db/migrations/migrations.js";
-import { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } from "@aws-sdk/client-s3";
-import { Upload } from "@aws-sdk/lib-storage";
 import path from "path";
 import { addProgressBar } from "./utils/progressBars.js";
 import * as fs from "fs";
@@ -81,18 +91,35 @@ import { HttpAPIServer } from "./rpc/httpServer.js";
 import { SingleBar } from "cli-progress";
 import { exportToProtobuf } from "@libp2p/peer-id-factory";
 import OnChainEventStore from "./storage/stores/onChainEventStore.js";
-import { ensureMessageData, isMessageInDB } from "./storage/db/message.js";
-import { getFarcasterTime } from "@farcaster/core";
+import { areMessagesInDb, ensureMessageData, isMessageInDB } from "./storage/db/message.js";
+import { getFarcasterTime, HubResult, MessageBundle } from "@farcaster/core";
+import { MerkleTrie } from "./network/sync/merkleTrie.js";
+import { DEFAULT_CATCHUP_SYNC_SNAPSHOT_MESSAGE_LIMIT } from "./defaultConfig.js";
+import { diagnosticReporter } from "./utils/diagnosticReport.js";
+import { startupCheck, StartupCheckStatus } from "./utils/startupCheck.js";
+import { AddressInfo } from "node:net";
+import { MeasureSyncHealthJobScheduler } from "./network/sync/syncHealthJob.js";
+import { MAX_BUNDLE_SIZE } from "./network/p2p/bundleCreator.js";
 
-export type HubSubmitSource = "gossip" | "rpc" | "eth-provider" | "l2-provider" | "sync" | "fname-registry";
+export type HubSubmitSource =
+  | "gossip"
+  | "rpc"
+  | "eth-provider"
+  | "l2-provider"
+  | "sync"
+  | "fname-registry"
+  | "sync-health";
 
-export const APP_VERSION = packageJson.version;
+export const APP_VERSION = JSON.parse(
+  fs.readFileSync(path.join(new URL(".", import.meta.url).pathname, "..", "./package.json")).toString(),
+).version;
 export const APP_NICKNAME = process.env["HUBBLE_NAME"] ?? "Farcaster Hub";
 
-export const SNAPSHOT_S3_DEFAULT_BUCKET = "download.farcaster.xyz";
-export const S3_REGION = "us-east-1";
+export const SNAPSHOT_S3_UPLOAD_BUCKET = "farcaster-snapshots";
+export const SNAPSHOT_S3_DOWNLOAD_BUCKET = "download.farcaster.xyz";
+export const S3_REGION = "auto";
 
-export const FARCASTER_VERSION = "2024.2.7";
+export const FARCASTER_VERSION = "2025.1.8";
 export const FARCASTER_VERSIONS_SCHEDULE: VersionSchedule[] = [
   { version: "2023.3.1", expiresAt: 1682553600000 }, // expires at 4/27/23 00:00 UTC
   { version: "2023.4.19", expiresAt: 1686700800000 }, // expires at 6/14/23 00:00 UTC
@@ -103,32 +130,54 @@ export const FARCASTER_VERSIONS_SCHEDULE: VersionSchedule[] = [
   { version: "2023.11.15", expiresAt: 1704844800000 }, // expires at 1/10/24 00:00 UTC
   { version: "2023.12.27", expiresAt: 1708473600000 }, // expires at 2/21/24 00:00 UTC
   { version: "2024.2.7", expiresAt: 1712102400000 }, // expires at 4/3/24 00:00 UTC
+  { version: "2024.3.20", expiresAt: 1715731200000 }, // expires at 5/15/24 00:00 UTC
+  { version: "2024.5.1", expiresAt: 1719360000000 }, // expires at 6/26/24 00:00 UTC
+  { version: "2024.6.12", expiresAt: 1722988800000 }, // expires at 8/7/24 00:00 UTC
+  { version: "2024.7.24", expiresAt: 1726617600000 }, // expires at 9/18/24 00:00 UTC
+  { version: "2024.9.4", expiresAt: 1730246400000 }, // expires at 10/30/24 00:00 UTC
+  { version: "2024.10.16", expiresAt: 1733875200000 }, // expires at 12/11/24 00:00 UTC
+  { version: "2024.11.27", expiresAt: 1737504000000 }, // expires at 1/22/25 00:00 UTC
+  { version: "2025.1.8", expiresAt: 1741132800000 }, // expires at 1/22/25 00:00 UTC
 ];
 
-const MAX_CONTACT_INFO_AGE_MS = GOSSIP_SEEN_TTL;
+const MAX_CONTACT_INFO_AGE_MS = 1000 * 60 * 60; // 60 minutes
+const CONTACT_INFO_UPDATE_THRESHOLD_MS = 1000 * 60 * 30; // 30 minutes
+const ALLOWED_CLOCK_SKEW_SECONDS = 60 * 10; // 10 minutes
 
 export interface HubInterface {
   engine: Engine;
   identity: string;
+  performedFirstSync: boolean;
   hubOperatorFid?: number;
   submitMessage(message: Message, source?: HubSubmitSource): HubAsyncResult<number>;
+  submitMessageBundle(
+    creationFarcasterTime: number,
+    messageBundle: MessageBundle,
+    source?: HubSubmitSource,
+    peerId?: PeerId,
+  ): Promise<HubResult<number>[]>;
   validateMessage(message: Message): HubAsyncResult<Message>;
   submitUserNameProof(usernameProof: UserNameProof, source?: HubSubmitSource): HubAsyncResult<number>;
   submitOnChainEvent(event: OnChainEvent, source?: HubSubmitSource): HubAsyncResult<number>;
   getHubState(): HubAsyncResult<HubState>;
   putHubState(hubState: HubState): HubAsyncResult<void>;
   gossipContactInfo(): HubAsyncResult<void>;
+  getHubRpcClient(address: string, options?: Partial<ClientOptions>): Promise<HubRpcClient | undefined>;
   getRPCClientForPeer(
     peerId: PeerId,
     peer: ContactInfoContentBody,
     options?: Partial<ClientOptions>,
   ): Promise<HubRpcClient | undefined>;
   updateApplicationPeerScore(peerId: String, score: number): HubAsyncResult<void>;
+  bootstrapAddrs(): Multiaddr[];
 }
 
 export interface HubOptions {
   /** Farcaster network */
   network: FarcasterNetwork;
+
+  /** Wether to log individual submitMessage status */
+  logIndividualMessages?: boolean;
 
   /** The PeerId of this Hub */
   peerId?: PeerId;
@@ -157,8 +206,11 @@ export interface HubOptions {
   /** Port for libp2p to listen for gossip */
   gossipPort?: number;
 
-  /** Port for the RPC Client */
+  /** Port for the RPC Server */
   rpcPort?: number;
+
+  /** Announced port for the RPC Server. Useful if using a reverse proxy */
+  announceRpcPort?: number;
 
   /** Port for the HTTP API Server */
   httpApiPort?: number;
@@ -176,7 +228,7 @@ export interface HubOptions {
   rankRpcs?: boolean;
 
   /** StatsD parameters */
-  statsdParams?: StatsDInitParams | undefined;
+  statsdParams?: StatsDClientOptions | undefined;
 
   /** ETH mainnet RPC URL(s) */
   ethMainnetRpcUrl?: string;
@@ -263,13 +315,24 @@ export interface HubOptions {
   pruneEventsJobCron?: string;
 
   /** A list of addresses the node directly peers with, provided in MultiAddr format */
-  directPeers?: AddrInfo[];
+  directPeers?: string[];
 
   /** If set, snapshot sync is disabled */
   disableSnapshotSync?: boolean;
 
   /** Enable daily backups to S3 */
   enableSnapshotToS3?: boolean;
+
+  /** If set, check catchupSyncSnapshotMessageLimit and if message difference
+   * exceeds that limit, clear existing db and replace with downloaded snapshot
+   * */
+  catchupSyncWithSnapshot?: boolean;
+
+  /**
+   * Message limit - when exceeded, trigger catchup sync using snapshot
+   * NOTE: Catchup sync using snapshot WILL RESET THE DATABASE
+   */
+  catchupSyncSnapshotMessageLimit?: number;
 
   /** S3 bucket to upload snapshots to */
   s3SnapshotBucket?: string;
@@ -291,12 +354,22 @@ export interface HubOptions {
 
   /** Should we connect to DB peers on startup */
   connectToDbPeers?: boolean;
+
+  /** Should we use streaming for client-side sync? */
+  useStreaming?: boolean;
 }
 
 /** @returns A randomized string of the format `rocksdb.tmp.*` used for the DB Name */
 export const randomDbName = () => {
   return `rocksdb.tmp.${(new Date().getUTCDate() * Math.random()).toString(36).substring(2)}`;
 };
+
+export enum HubShutdownReason {
+  SELF_TERMINATED = 0,
+  SIG_TERM = 1,
+  EXCEPTION = 2,
+  UNKNOWN = 3,
+}
 
 const log = logger.child({
   component: "Hub",
@@ -309,7 +382,6 @@ export class Hub implements HubInterface {
   private adminServer: AdminServer;
   private httpApiServer: HttpAPIServer;
 
-  private contactTimer?: NodeJS.Timer;
   private rocksDB: RocksDB;
   private syncEngine: SyncEngine;
   private allowedPeerIds: string[] | undefined;
@@ -317,9 +389,6 @@ export class Hub implements HubInterface {
   private allowlistedImmunePeers: string[] | undefined;
   private strictContactInfoValidation: boolean;
   private strictNoSign: boolean;
-  private performedFirstSync = false;
-
-  private s3_snapshot_bucket: string;
 
   private pruneMessagesJobScheduler: PruneMessagesJobScheduler;
   private periodSyncJobScheduler: PeriodicSyncJobScheduler;
@@ -330,10 +399,15 @@ export class Hub implements HubInterface {
   private gossipContactInfoJobScheduler: GossipContactInfoJobScheduler;
   private checkIncomingPortsJobScheduler: CheckIncomingPortsJobScheduler;
   private updateNetworkConfigJobScheduler: UpdateNetworkConfigJobScheduler;
+  private dbSnapshotBackupJobScheduler: DbSnapshotBackupJobScheduler;
+  private measureSyncHealthJobScheduler: MeasureSyncHealthJobScheduler;
+
+  private submitMessageLogger = new SubmitMessageSuccessLogCache(log);
 
   engine: Engine;
   fNameRegistryEventsProvider: FNameRegistryEventsProvider;
   l2RegistryProvider: L2EventsProvider;
+  performedFirstSync = false;
 
   constructor(options: HubOptions) {
     this.options = options;
@@ -382,8 +456,6 @@ export class Hub implements HubInterface {
     this.rocksDB = new RocksDB(options.rocksDBName ? options.rocksDBName : randomDbName());
     this.gossipNode = new GossipNode(this.rocksDB, this.options.network);
 
-    this.s3_snapshot_bucket = options.s3SnapshotBucket ?? SNAPSHOT_S3_DEFAULT_BUCKET;
-
     const eventHandler = new StoreEventHandler(this.rocksDB, {
       lockMaxPending: options.commitLockMaxPending,
       lockExecutionTimeout: options.commitLockTimeout,
@@ -402,7 +474,15 @@ export class Hub implements HubInterface {
       chain: mainnet,
       transport: fallback(transports, { rank: options.rankRpcs ?? false }),
     });
-    this.engine = new Engine(this.rocksDB, options.network, eventHandler, mainnetClient, opClient);
+    this.engine = new Engine(
+      this.rocksDB,
+      options.network,
+      eventHandler,
+      mainnetClient,
+      opClient as PublicClient,
+      this.fNameRegistryEventsProvider,
+      this.l2RegistryProvider,
+    );
 
     const profileSync = options.profileSync ?? false;
     this.syncEngine = new SyncEngine(
@@ -411,6 +491,8 @@ export class Hub implements HubInterface {
       this.l2RegistryProvider,
       this.fNameRegistryEventsProvider,
       profileSync,
+      undefined,
+      options.useStreaming,
     );
 
     this.strictContactInfoValidation = options.strictContactInfoValidation || false;
@@ -452,7 +534,7 @@ export class Hub implements HubInterface {
             console.log(prettyPrintTable(profile.resultBytesToPrettyPrintObject()));
           }
 
-          await this.stop();
+          await this.stop(HubShutdownReason.SELF_TERMINATED);
           process.exit(0);
         }
       });
@@ -471,7 +553,7 @@ export class Hub implements HubInterface {
     this.adminServer = new AdminServer(this, this.rocksDB, this.engine, this.syncEngine, options.rpcAuth);
 
     // Setup job schedulers/workers
-    this.pruneMessagesJobScheduler = new PruneMessagesJobScheduler(this.engine, () => this.syncEngine.syncTrieQSize);
+    this.pruneMessagesJobScheduler = new PruneMessagesJobScheduler(this.engine);
     this.periodSyncJobScheduler = new PeriodicSyncJobScheduler(this, this.syncEngine);
     this.pruneEventsJobScheduler = new PruneEventsJobScheduler(this.engine);
     this.checkFarcasterVersionJobScheduler = new CheckFarcasterVersionJobScheduler(this);
@@ -479,6 +561,13 @@ export class Hub implements HubInterface {
     this.gossipContactInfoJobScheduler = new GossipContactInfoJobScheduler(this);
     this.checkIncomingPortsJobScheduler = new CheckIncomingPortsJobScheduler(this.rpcServer, this.gossipNode);
     this.updateNetworkConfigJobScheduler = new UpdateNetworkConfigJobScheduler(this);
+    this.dbSnapshotBackupJobScheduler = new DbSnapshotBackupJobScheduler(
+      this.rocksDB,
+      this.syncEngine.trie.getDb(),
+      this.syncEngine,
+      this.options,
+    );
+    this.measureSyncHealthJobScheduler = new MeasureSyncHealthJobScheduler(this.syncEngine, this);
 
     if (options.testUsers) {
       this.testDataJobScheduler = new PeriodicTestDataJobScheduler(this.rpcServer, options.testUsers as TestUser[]);
@@ -514,11 +603,15 @@ export class Hub implements HubInterface {
     await this.syncEngine.diffSyncIfRequired(this, peerId);
   }
 
+  bootstrapAddrs(): Multiaddr[] {
+    return this.options.bootstrapAddrs ?? [];
+  }
+
   /* Start the GossipNode and RPC server  */
   async start() {
     // See if we have to fetch the IP address
     if (!this.options.announceIp || this.options.announceIp.trim().length === 0) {
-      const ipResult = await getPublicIp();
+      const ipResult = await getPublicIp("text");
       if (ipResult.isErr()) {
         log.error({ error: ipResult.error }, `failed to fetch public IP address, using ${this.options.ipMultiAddr}`);
       } else {
@@ -534,26 +627,23 @@ export class Hub implements HubInterface {
       }
     }
 
-    if (this.options.enableSnapshotToS3) {
-      // Back up the DB before opening it
-      const tarResult = await ResultAsync.fromPromise(rsCreateTarBackup(this.rocksDB.rustDb), (e) => e as Error);
-
-      if (tarResult.isOk()) {
-        // Upload to S3. Run this in the background so we don't block startup.
-        setTimeout(async () => {
-          const s3Result = await this.uploadToS3(tarResult.value);
-          if (s3Result.isErr()) {
-            log.error({ error: s3Result.error, errMsg: s3Result.error.message }, "failed to upload snapshot to S3");
-          }
-
-          // Delete the tar file, ignore errors
-          fs.unlink(tarResult.value, () => {});
-
-          // Cleanup old files from S3
-          this.deleteOldSnapshotsFromS3();
-        }, 10);
+    // Check if we need to catchup sync using snapshot
+    let catchupSyncResult: Result<boolean, Error> = ok(false);
+    // NOTE: catch up sync with snapshot is only supported on mainnet
+    if (this.options.catchupSyncWithSnapshot && this.options.network === FarcasterNetwork.MAINNET) {
+      log.info("attempting catchup sync with snapshot");
+      catchupSyncResult = await this.attemptCatchupSyncWithSnapshot();
+      if (catchupSyncResult.isErr()) {
+        log.error("failed to catchup sync using snapshot", {
+          error: catchupSyncResult.error,
+        });
+        // There is a risk that an error occurred after the database was cleared but before the snapshot
+        // was downloaded. In this case, we should throw error and exit.
+        throw catchupSyncResult.error;
+      } else if (catchupSyncResult.value) {
+        log.info("catchup sync using snapshot successful");
       } else {
-        log.error({ error: tarResult.error }, "failed to create tar backup for S3");
+        log.error("catchup sync skipped");
       }
     }
 
@@ -590,8 +680,13 @@ export class Hub implements HubInterface {
     }
 
     if (this.options.resetDB === true) {
-      log.info("clearing rocksdb");
-      await this.rocksDB.clear();
+      // Sync using catchup sync clears the database, so we don't need to do it again.
+      if (this.options.catchupSyncWithSnapshot && catchupSyncResult.isOk() && catchupSyncResult.value) {
+        log.info("skipping db reset as catchup sync with snapshot is enabled, which already cleared the db");
+      } else {
+        log.info("clearing rocksdb");
+        this.rocksDB.clear();
+      }
     } else {
       // Read if the Hub was cleanly shutdown last time
       const cleanShutdownR = await this.wasHubCleanShutdown();
@@ -667,6 +762,35 @@ export class Hub implements HubInterface {
 
     // Start the RPC server
     await this.rpcServer.start(this.options.rpcServerHost, this.options.rpcPort ?? 0);
+    const rpcPort = this.rpcServer.listenPort;
+    const rpcAddressCheck = await checkPortAndPublicAddress(
+      this.options.rpcServerHost ?? DEFAULT_SERVER_INTERNET_ADDRESS_IPV4,
+      rpcPort,
+      this.options.announceIp ?? undefined,
+    );
+    if (rpcAddressCheck.isErr()) {
+      const errorMessage = `Error validating RPC address at port ${this.options.rpcPort}.
+        Please make sure RPC port value is valid and reachable from public internet.
+        Reachable address is required for hub to perform diff sync via gRPC API and sync with the network.
+        Hub operators may need to enable port-forwarding of traffic to hub's host and port if they are behind a NAT.
+        `;
+      log.warn(
+        {
+          rpc_port: rpcPort,
+          local_address: this.options.rpcServerHost,
+          ...(this.options.announceIp && { public_ip: this.options.announceIp }),
+        },
+        errorMessage,
+      );
+      // NOTE(wazzymandias): startup check is performed in hub start rather than cli.ts because rpc server port
+      // may change if initialized with zero value. We don't know correct rpc port until server starts, and hub start
+      // is blocking synchronous operation. In general startup checks should stay within cli.ts as much as possible.
+      startupCheck.printStartupCheckStatus(StartupCheckStatus.WARNING, errorMessage);
+      // NOTE(wazzymandias): For now, we will not throw error here, in order to give hub operators enough time
+      // to configure their network settings. We will throw error in the future.
+      // throw new HubError("unavailable.network_failure", errorMessage);
+    }
+
     if (!this.options.httpServerDisabled) {
       await this.httpApiServer.start(this.options.rpcServerHost, this.options.httpApiPort ?? 0);
     } else {
@@ -679,12 +803,12 @@ export class Hub implements HubInterface {
     await this.l2RegistryProvider.start();
     await this.fNameRegistryEventsProvider.start();
 
-    const bootstrapAddrs = this.options.bootstrapAddrs ?? [];
-
-    const peerId = this.options.peerId ? exportToProtobuf(this.options.peerId) : undefined;
+    const peerId = this.options.peerId
+      ? exportToProtobuf(this.options.peerId as RSAPeerId | Ed25519PeerId | Secp256k1PeerId)
+      : undefined;
 
     // Start the Gossip node
-    await this.gossipNode.start(bootstrapAddrs, {
+    await this.gossipNode.start(this.bootstrapAddrs(), {
       peerId,
       ipMultiAddr: this.options.ipMultiAddr,
       announceIp: this.options.announceIp,
@@ -707,12 +831,16 @@ export class Hub implements HubInterface {
     this.pruneEventsJobScheduler.start(this.options.pruneEventsJobCron);
     this.checkFarcasterVersionJobScheduler.start();
     this.validateOrRevokeMessagesJobScheduler.start();
-    this.gossipContactInfoJobScheduler.start("*/1 * * * *"); // Every minute
+
+    const randomMinute = Math.floor(Math.random() * 15);
+    this.gossipContactInfoJobScheduler.start(`${randomMinute}-59/15 * * * *`); // Weird syntax but required by cron, random minute every 15 minutes
     this.checkIncomingPortsJobScheduler.start();
+    this.measureSyncHealthJobScheduler.start();
 
     // Mainnet only jobs
     if (this.options.network === FarcasterNetwork.MAINNET) {
       this.updateNetworkConfigJobScheduler.start();
+      this.dbSnapshotBackupJobScheduler.start();
     }
 
     // Testnet/Devnet only jobs
@@ -724,7 +852,25 @@ export class Hub implements HubInterface {
     // When we startup, we write into the DB that we have not yet cleanly shutdown. And when we do
     // shutdown, we'll write "true" to this key, indicating that we've cleanly shutdown.
     // This way, when starting up, we'll know if the previous shutdown was clean or not.
-    await this.writeHubCleanShutdown(false);
+    await this.writeHubCleanShutdown(false, HubShutdownReason.UNKNOWN);
+
+    // Set up a timer to log the memory usage every minute
+    setInterval(() => {
+      const memoryData = process.memoryUsage();
+      statsd().gauge("memory.rss", memoryData.rss);
+      statsd().gauge("memory.heap_total", memoryData.heapTotal);
+      statsd().gauge("memory.heap_used", memoryData.heapUsed);
+      statsd().gauge("memory.external", memoryData.external);
+
+      // Uncomment this code to enable heap dumps
+      // if (memoryData.heapUsed > 3 * 1024 * 1024 * 1024 && Date.now() - lastHeapDumpTime > 10 * 60 * 1000) {
+      //   const fileName = `${DB_DIRECTORY}/process/HeapDump-${Date.now()}.heapsnapshot`;
+
+      //   const writtenFileName = v8.writeHeapSnapshot(fileName);
+      //   log.info({ writtenFileName }, "Wrote heap snapshot");
+      //   lastHeapDumpTime = Date.now();
+      // }
+    }, 60 * 1000);
   }
 
   /** Apply the new the network config. Will return true if the Hub should exit */
@@ -737,6 +883,7 @@ export class Hub implements HubInterface {
       strictNoSign,
       shouldExit,
       solanaVerificationsEnabled,
+      useStreaming,
     } = applyNetworkConfig(
       networkConfig,
       this.allowedPeerIds,
@@ -745,7 +892,8 @@ export class Hub implements HubInterface {
       this.options.allowlistedImmunePeers,
       this.options.strictContactInfoValidation,
       this.options.strictNoSign,
-      this.engine.solanaVerficationsEnabled,
+      this.engine.solanaVerificationsEnabled,
+      this.options.useStreaming,
     );
 
     if (shouldExit) {
@@ -772,11 +920,91 @@ export class Hub implements HubInterface {
     }
   }
 
-  async snapshotSync(): HubAsyncResult<boolean> {
+  // Attempt to catchup sync using snapshot.
+  // NOTE: This method will clear the existing DB and replace it with the downloaded snapshot.
+  async attemptCatchupSyncWithSnapshot(): HubAsyncResult<boolean> {
+    if (!this.syncEngine) {
+      return err(new HubError("unavailable", "sync engine not available"));
+    }
+    const limit = this.options.catchupSyncSnapshotMessageLimit ?? DEFAULT_CATCHUP_SYNC_SNAPSHOT_MESSAGE_LIMIT;
+    const snapURL = snapshotURL(this.options.network, 0);
+    const metadata = await fetchSnapshotMetadata(snapURL);
+
+    if (metadata.isErr()) {
+      log.error("failed to fetch snapshot metadata", {
+        error: metadata.error,
+        snapshotURL: snapURL,
+      });
+      return err(new HubError("unavailable", `failed to fetch snapshot metadata - ${metadata.error.message}`));
+    }
+
+    const itemCount = await MerkleTrie.numItems(this.syncEngine.trie);
+    if (itemCount.isErr()) {
+      log.error("failed to get merkle trie item count", {
+        error: itemCount.error,
+      });
+      return err(new HubError("unavailable", `failed to get merkle trie item count - ${itemCount.error.message}`));
+    }
+
+    const currentItemCount = itemCount.value;
+    let shouldCatchupSync = false;
+    // compare current db statistics with latest snapshot metadata
+    const snapshotMetadata: SnapshotMetadata = metadata.value;
+    let delta = -1;
+    if (!snapshotMetadata.numMessages) {
+      log.error("snapshot metadata does not contain message count");
+      return err(new HubError("unavailable", "snapshot metadata does not contain message count"));
+    }
+
+    delta = snapshotMetadata.numMessages - currentItemCount;
+    if (delta > limit) {
+      log.info({ delta, limit, current_item_count: currentItemCount }, "catchup sync using snapshot");
+      shouldCatchupSync = true;
+    }
+
+    if (shouldCatchupSync) {
+      const SHUTDOWN_GRACE_PERIOD_MS = 30 * 1000; // 30 seconds
+      log.info(`beginning snapshot sync in ${SHUTDOWN_GRACE_PERIOD_MS.toString()}ms - THIS WILL RESET THE DATABASE`);
+      // Sleep for a bit to allow user some time to cancel the operation before we purge the DB
+      await sleep(SHUTDOWN_GRACE_PERIOD_MS);
+
+      // We use the item count in the trie RocksDB to determine if catchup sync is warranted.
+      // However, the messages RocksDB will be cleared and replaced with the downloaded snapshot which contains both DBs.
+      rsDbDestroy(this.syncEngine.trie.getDb().rustDb);
+      rsDbDestroy(this.rocksDB.rustDb);
+
+      const snapshotResult = await this.snapshotSync(true);
+      if (snapshotResult.isErr()) {
+        log.error({ error: snapshotResult.error }, "failed to sync snapshot, falling back to diff sync");
+        return err(new HubError("unavailable", `failed to sync snapshot - ${snapshotResult.error.message}`));
+      }
+      log.info(
+        {
+          currentItemCount,
+          snapshot_metadata: snapshotMetadata.numMessages ?? -1,
+          delta,
+          limit,
+        },
+        "catchup sync using snapshot complete",
+      );
+      return ok(true);
+    } else {
+      log.info(
+        {
+          currentItemCount,
+          delta,
+          limit,
+        },
+        "catchup sync using snapshot not required",
+      );
+      return ok(false);
+    }
+  }
+  async snapshotSync(overwrite?: boolean): HubAsyncResult<boolean> {
+    const s3Bucket = this.options.s3SnapshotBucket ?? SNAPSHOT_S3_DOWNLOAD_BUCKET;
     return new Promise((resolve) => {
       (async () => {
         let progressBar: SingleBar | undefined;
-
         try {
           const dbLocation = this.rocksDB.location;
           const dbFiles = Result.fromThrowable(
@@ -784,93 +1012,115 @@ export class Hub implements HubInterface {
             (e) => e,
           )();
 
-          if (dbFiles.isErr() || dbFiles.value.length === 0) {
-            log.info({ dbLocation }, "DB is empty, fetching snapshot from S3");
+          if (dbFiles.isErr() || dbFiles.value.length === 0 || overwrite) {
+            log.info(
+              {
+                db_location: dbLocation,
+                file_count: dbFiles.isErr() ? 0 : dbFiles.value.length,
+                overwrite,
+              },
+              "DB is empty or overwrite is true, fetching snapshot from S3",
+            );
 
             let prevVersion = 0;
-            let latestSnapshotKey;
+            let latestSnapshotKeyBase;
+            let latestChunks: string[] = [];
             do {
-              const response = await axios.get(
-                `https://download.farcaster.xyz/${this.getSnapshotFolder(prevVersion)}/latest.json`,
+              const response = await ResultAsync.fromPromise(
+                axios.get(`https://${s3Bucket}/${this.getSnapshotFolder(prevVersion)}/latest.json`),
+                (e) => e,
               );
-              const { key } = response.data;
 
-              if (!key) {
+              if (
+                response.isErr() ||
+                !response.value.data ||
+                !response.value.data.keyBase ||
+                !response.value.data.chunks
+              ) {
                 log.error(
-                  { data: response.data, folder: this.getSnapshotFolder(prevVersion) },
+                  { response, folder: this.getSnapshotFolder(prevVersion) },
                   "No latest snapshot name found in latest.json",
                 );
                 prevVersion += 1;
               } else {
-                latestSnapshotKey = key as string;
+                const { keyBase, chunks } = response.value.data;
+
+                latestSnapshotKeyBase = keyBase as string;
+                latestChunks = chunks as string[];
                 break;
               }
             } while (prevVersion < LATEST_DB_SCHEMA_VERSION);
 
-            if (!latestSnapshotKey) {
+            if (!latestSnapshotKeyBase) {
               resolve(err(new HubError("unavailable", "No latest snapshot name found in latest.json")));
               return;
             } else {
-              log.info({ latestSnapshotKey }, "found latest S3 snapshot");
+              log.info({ latestSnapshotKeyBase }, "found latest S3 snapshot");
             }
 
-            const snapshotUrl = `https://download.farcaster.xyz/${latestSnapshotKey}`;
-            const response2 = await axios.get(snapshotUrl, {
-              responseType: "stream",
-            });
-            const totalSize = parseInt(response2.headers["content-length"], 10);
-
-            let downloadedSize = 0;
-            progressBar = addProgressBar("Getting snapshot", totalSize);
-
-            const handleError = (e: Error) => {
-              log.error({ error: e }, "Error extracting snapshot");
-              progressBar?.stop();
-              resolve(err(new HubError("unavailable", "Error extracting snapshot")));
-            };
-
-            const gunzip = zlib.createGunzip();
             const parseStream = new tar.Parse();
+            const gunzip = zlib.createGunzip();
+            gunzip.pipe(parseStream);
+
+            gunzip.on("error", (e: Error) => {
+              log.error({ error: e }, "Error decompressing snapshot");
+              progressBar?.stop();
+              resolve(err(new HubError("unavailable", "Error decompressing snapshot")));
+            });
 
             // We parse the tar file and extract it into the DB location, which might be different
             // than the location it was originally created in. So, we transform the top-level
             // directory name to the DB location.
-            parseStream.on("entry", (entry) => {
-              const newPath = path.join(dbLocation, ...entry.path.split(path.sep).slice(1));
-              const newDir = path.dirname(newPath);
+            const entryPromises: Promise<boolean>[] = [];
 
-              if (entry.type === "Directory") {
-                fs.mkdirSync(newPath, { recursive: true });
-                entry.resume();
-              } else {
-                fs.mkdirSync(newDir, { recursive: true });
-                entry.pipe(fs.createWriteStream(newPath));
-              }
+            parseStream.on("entry", (entry) => {
+              const promise = new Promise<boolean>((resolve, reject) => {
+                const newPath = path.join(dbLocation, ...entry.path.split(path.sep).slice(1));
+                const newDir = path.dirname(newPath);
+
+                if (entry.type === "Directory") {
+                  fs.mkdirSync(newPath, { recursive: true });
+                  entry.resume();
+                  resolve(true);
+                } else {
+                  fs.mkdirSync(newDir, { recursive: true });
+                  const outStream = fs.createWriteStream(newPath);
+                  entry.pipe(outStream);
+                  outStream.on("finish", resolve);
+                  outStream.on("error", reject);
+                }
+              });
+              entryPromises.push(promise);
             });
 
-            parseStream.on("end", () => {
+            parseStream.on("end", async () => {
+              await Promise.all(entryPromises);
               log.info({ dbLocation }, "Snapshot extracted from S3");
               progressBar?.stop();
               resolve(ok(true));
             });
 
-            let lastDownloadedSize = 0;
-            response2.data
-              .on("error", handleError)
-              // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-              .on("data", (chunk: any) => {
-                downloadedSize += chunk.length;
-                progressBar?.update(downloadedSize);
+            await this.getSnapshotChunks(dbLocation, s3Bucket, latestSnapshotKeyBase, latestChunks);
 
-                if (downloadedSize - lastDownloadedSize > 1024 * 1024 * 1024) {
-                  log.info({ downloadedSize, totalSize }, "Downloading snapshot...");
-                  lastDownloadedSize = downloadedSize;
-                }
-              })
-              .pipe(gunzip)
-              .on("error", handleError)
-              .pipe(parseStream)
-              .on("error", handleError);
+            progressBar = addProgressBar("Decompressing chunks", latestChunks.length);
+            let chunkCount = 0;
+
+            for (const chunk of latestChunks) {
+              await new Promise((resolve) => {
+                log.info({ chunk: chunk }, "Decompressing chunk");
+                const chunkStream = fs.createReadStream(path.join(dbLocation, "..", "tmp", chunk));
+                chunkStream.on("end", () => {
+                  resolve(true);
+                });
+                chunkStream.pipe(gunzip, { end: false });
+                chunkCount += 1;
+                progressBar?.update(chunkCount);
+              });
+            }
+
+            gunzip.end();
+
+            fs.rmdir(path.join(dbLocation, "..", "tmp"), { recursive: true }, () => {});
           } else {
             resolve(ok(false));
           }
@@ -883,12 +1133,130 @@ export class Hub implements HubInterface {
     });
   }
 
+  async getSnapshotChunks(
+    dbLocation: string,
+    s3Bucket: string,
+    latestSnapshotKeyBase: string,
+    latestChunks: string[],
+  ): HubAsyncResult<boolean> {
+    let progressBar: SingleBar | undefined;
+    try {
+      const terminatingError = (e: Error) => {
+        log.error({ error: e }, "Error downloading snapshot");
+        progressBar?.stop();
+        return err(new HubError("unavailable", "Error extracting snapshot"));
+      };
+
+      log.info({ numChunks: latestChunks.length }, "Getting snapshot chunks...");
+      progressBar = addProgressBar("Getting snapshot", latestChunks.length * 100);
+      fs.mkdirSync(path.join(dbLocation, "..", "tmp"), { recursive: true });
+
+      let totalDownloaded = 0;
+
+      class ChunkProcessor {
+        chunk: string;
+
+        constructor(chunk: string) {
+          this.chunk = chunk;
+        }
+
+        async run() {
+          let downloadedSize = 0;
+          chunkCount += 1;
+          log.info({ chunkCount, totalChunks: latestChunks.length }, "Downloading snapshot chunks...");
+
+          let done = false;
+
+          while (!done) {
+            try {
+              const chunkUrl = `https://${s3Bucket}/${latestSnapshotKeyBase}/${this.chunk}`;
+              const chunkResponse = await axios.get(chunkUrl, {
+                responseType: "stream",
+              });
+              const totalSize = parseInt(chunkResponse.headers["content-length"], 10);
+
+              done = await new Promise((resolve) => {
+                const outStream = fs.createWriteStream(path.join(dbLocation, "..", "tmp", `${this.chunk}.tmp`));
+                chunkResponse.data
+                  .on("error", (e: Error) => {
+                    log.error({ error: e, chunk: this.chunk }, "Failed to download chunk, reattempting...");
+                    totalDownloaded -= (downloadedSize * 100) / totalSize;
+                    downloadedSize = 0;
+                    resolve(false);
+                  })
+                  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
+                  .on("data", (dataChunk: any) => {
+                    downloadedSize += dataChunk.length;
+                    totalDownloaded += (dataChunk.length * 100) / totalSize;
+                    progressBar?.update(Math.round(totalDownloaded));
+                  })
+                  .on("end", () => {
+                    resolve(true);
+                  })
+                  .pipe(outStream);
+              });
+
+              if (done) {
+                fs.rename(
+                  path.join(dbLocation, "..", "tmp", `${this.chunk}.tmp`),
+                  path.join(dbLocation, "..", "tmp", `${this.chunk}`),
+                  () => {},
+                );
+              } else {
+                fs.rm(path.join(dbLocation, "..", "tmp", `${this.chunk}.tmp`), () => {});
+              }
+            } catch (e) {
+              done = false;
+            }
+          }
+        }
+      }
+
+      let chunkCount = 0;
+      const chunkProcessors: ChunkProcessor[] = [];
+
+      for (let i = 0; i < latestChunks.length; i++) {
+        const chunk = latestChunks[i];
+        if (!chunk) {
+          log.error({ error: new Error("missing chunk") }, `Chunk info missing for index ${i}`);
+          return terminatingError(new HubError("unavailable", "An error occurred during snapshot synchronization"));
+        }
+        chunkProcessors.push(new ChunkProcessor(chunk));
+      }
+
+      let runningPromises = 0;
+      const promises = [];
+      while (chunkProcessors.length > 0) {
+        while (runningPromises < 4 && chunkProcessors.length > 0) {
+          const processor = chunkProcessors.shift();
+          if (processor) {
+            runningPromises += 1;
+            promises.push(
+              processor.run().then(() => {
+                runningPromises -= 1;
+              }),
+            );
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      await Promise.allSettled(promises);
+
+      return ok(true);
+    } catch (error) {
+      log.error({ error }, "An error occurred during snapshot synchronization");
+      progressBar?.stop();
+      return err(new HubError("unavailable", "An error occurred during snapshot synchronization"));
+    }
+  }
+
   async getContactInfoContent(): HubAsyncResult<ContactInfoContent> {
     const nodeMultiAddr = this.gossipAddresses[0] as Multiaddr;
     const family = nodeMultiAddr?.nodeAddress().family;
     const announceIp = this.options.announceIp ?? nodeMultiAddr?.nodeAddress().address;
     const gossipPort = nodeMultiAddr?.nodeAddress().port;
-    const rpcPort = this.rpcServer.address?.map((addr) => addr.port).unwrapOr(0);
+    const rpcPort = this.options.announceRpcPort;
 
     const gossipAddressContactInfo = GossipAddressInfo.create({
       address: announceIp,
@@ -952,14 +1320,13 @@ export class Hub implements HubInterface {
     return ok(content);
   }
 
-  async teardown() {
-    await this.stop();
+  async teardown(reason: HubShutdownReason) {
+    await this.stop(reason);
   }
 
   /** Stop the GossipNode and RPC Server */
-  async stop(terminateGossipWorker = true) {
+  async stop(reason: HubShutdownReason, terminateGossipWorker = true) {
     log.info("Stopping Hubble...");
-    clearInterval(this.contactTimer);
 
     // First, stop the RPC/Gossip server so we don't get any more messages
     if (!this.options.httpServerDisabled) {
@@ -986,13 +1353,15 @@ export class Hub implements HubInterface {
     this.gossipContactInfoJobScheduler.stop();
     this.checkIncomingPortsJobScheduler.stop();
     this.updateNetworkConfigJobScheduler.stop();
+    this.dbSnapshotBackupJobScheduler.stop();
+    this.measureSyncHealthJobScheduler.stop();
 
     // Stop the engine
     await this.engine.stop();
 
     // Close the DB, which will flush all data to disk. Just before we close, though, write that
     // we've cleanly shutdown.
-    await this.writeHubCleanShutdown(true);
+    await this.writeHubCleanShutdown(true, reason);
     await this.rocksDB.close();
 
     log.info("Hubble stopped, exiting normally");
@@ -1033,6 +1402,8 @@ export class Hub implements HubInterface {
       );
 
       await this.gossipNode.gossipContactInfo(contactInfo);
+      statsd().gauge("peer_store.count", await this.gossipNode.peerStoreCount());
+      statsd().gauge("active_peers.count", this.syncEngine.getActivePeerCount());
       return Promise.resolve(ok(undefined));
     }
   }
@@ -1043,12 +1414,34 @@ export class Hub implements HubInterface {
 
   private async handleGossipMessage(gossipMessage: GossipMessage, source: PeerId, msgId: string): HubAsyncResult<void> {
     let reportedAsInvalid = false;
+    const currentTime = getFarcasterTime().unwrapOr(0);
+    const messageFirstGossipedTime = gossipMessage.timestamp ?? 0;
+    const gossipMessageDelay = currentTime - messageFirstGossipedTime;
     if (gossipMessage.timestamp) {
+      if (gossipMessage.timestamp > currentTime && gossipMessage.timestamp - currentTime > ALLOWED_CLOCK_SKEW_SECONDS) {
+        log.error(
+          {
+            allowedClockSkew: ALLOWED_CLOCK_SKEW_SECONDS,
+            currentTime,
+            gossipMessageTimestamp: gossipMessage.timestamp,
+            source: source.toString(),
+          },
+          "Received gossip message with future timestamp",
+        );
+        await this.gossipNode.reportValid(msgId, peerIdFromString(source.toString()).toBytes(), false);
+        return err(
+          new HubError(
+            "bad_request.invalid_param",
+            "Invalid Farcaster timestamp in gossip message - future timestamp found in seconds from Farcaster Epoch",
+          ),
+        );
+      }
       // If message is older than seenTTL, we will try to merge it, but report it as invalid so it doesn't
       // propogate across the network
       const cutOffTime = getFarcasterTime().unwrapOr(0) - GOSSIP_SEEN_TTL / 1000;
 
       if (gossipMessage.timestamp < cutOffTime) {
+        statsd().timing("gossip.message_bundle_delay.invalid", gossipMessageDelay);
         await this.gossipNode.reportValid(msgId, peerIdFromString(source.toString()).toBytes(), false);
         reportedAsInvalid = true;
       }
@@ -1062,65 +1455,108 @@ export class Hub implements HubInterface {
       return Promise.resolve(err(peerIdResult.error));
     }
 
-    if (gossipMessage.message) {
-      const message = gossipMessage.message;
-
-      if (this.syncEngine.syncMergeQSize + this.syncEngine.syncTrieQSize > MAX_MESSAGE_QUEUE_SIZE) {
+    if (gossipMessage.message || gossipMessage.messageBundle) {
+      if (this.syncEngine.syncMergeQSize + this.syncEngine.syncTrieQSize > MAX_SYNCTRIE_QUEUE_SIZE) {
         // If there are too many messages in the queue, drop this message. This is a gossip message, so the sync
         // will eventually re-fetch and merge this message in anyway.
+        const msg = "Sync queue is full, dropping gossip message";
         log.warn(
           {
             syncTrieQ: this.syncEngine.syncTrieQSize,
             syncMergeQ: this.syncEngine.syncMergeQSize,
           },
-          "Sync queue is full, dropping gossip message",
+          msg,
         );
-        return err(new HubError("unavailable", "Sync queue is full"));
+        diagnosticReporter().reportUnavailable(this.handleGossipMessage.name, msg, {
+          syncTrieQ: this.syncEngine.syncTrieQSize,
+          syncMergeQ: this.syncEngine.syncMergeQSize,
+        });
+        return err(new HubError("unavailable", msg));
       }
-
-      const currentTime = getFarcasterTime().unwrapOr(0);
-      const messageFirstGossipedTime = gossipMessage.timestamp ?? 0;
-      const gossipMessageDelay = currentTime - messageFirstGossipedTime;
 
       // Merge the message
-      const result = await this.submitMessage(message, "gossip");
-      if (result.isOk()) {
-        if (!reportedAsInvalid) {
-          await this.gossipNode.reportValid(msgId, peerIdFromString(source.toString()).toBytes(), true);
+      if (gossipMessage.message) {
+        const message = gossipMessage.message;
+        const result = await this.submitMessage(message, "gossip");
+        if (result.isOk()) {
+          if (!reportedAsInvalid) {
+            await this.gossipNode.reportValid(msgId, peerIdFromString(source.toString()).toBytes(), true);
+          }
+        } else {
+          const tags: { [key: string]: string } = {
+            valid: reportedAsInvalid ? "false" : "true",
+            error_code: result.error.errCode,
+            message_type: messageTypeToName(message.data?.type),
+          };
+
+          statsd().increment("gossip.message_failure", 1, tags);
+          log.info(
+            {
+              errCode: result.error.errCode,
+              errMsg: result.error.message,
+              peerId: source.toString(),
+              origin: peerIdResult.value,
+              hash: bytesToHexString(message.hash).unwrapOr(""),
+              fid: message.data?.fid,
+              type: message.data?.type,
+              gossipDelay: gossipMessageDelay,
+              valid: !reportedAsInvalid,
+              msgId,
+            },
+            "Received bad gossip message from peer",
+          );
+          if (!reportedAsInvalid) {
+            await this.gossipNode.reportValid(msgId, peerIdFromString(source.toString()).toBytes(), false);
+          }
         }
+        const mergeResult = result.isOk() ? "success" : "failure";
+        statsd().timing("gossip.message_delay", gossipMessageDelay, { status: mergeResult });
+
+        return result.map(() => undefined);
+      } else if (gossipMessage.messageBundle) {
+        const bundle = gossipMessage.messageBundle;
+        const results = await this.submitMessageBundle(messageFirstGossipedTime, bundle, "gossip", source);
+
+        // If at least one is Ok, report as valid
+        const atLeastOneOk = results.find((r) => r.isOk());
+        if (atLeastOneOk) {
+          if (!reportedAsInvalid) {
+            await this.gossipNode.reportValid(msgId, peerIdFromString(source.toString()).toBytes(), true);
+          }
+          statsd().timing("gossip.message_bundle_delay.success", gossipMessageDelay);
+        } else {
+          const errCode = results[0]?._unsafeUnwrapErr()?.errCode as string;
+          const errMsg = results[0]?._unsafeUnwrapErr()?.message;
+
+          const tags: { [key: string]: string } = {
+            valid: reportedAsInvalid ? "false" : "true",
+            error_code: errCode,
+          };
+
+          statsd().increment("gossip.message_bundle_failure", 1, tags);
+          log.info(
+            {
+              errCode,
+              errMsg,
+              peerId: source.toString(),
+              origin: peerIdResult.value,
+              gossipDelay: gossipMessageDelay,
+              valid: !reportedAsInvalid,
+              msgId,
+            },
+            "Received bad gossip message bundle from peer",
+          );
+          if (!reportedAsInvalid) {
+            await this.gossipNode.reportValid(msgId, peerIdFromString(source.toString()).toBytes(), false);
+          }
+          statsd().timing("gossip.message_bundle_delay.failure", gossipMessageDelay);
+        }
+
+        return ok(undefined);
       } else {
-        const tags: { [key: string]: string } = {
-          valid: reportedAsInvalid ? "false" : "true",
-          error_code: result.error.errCode,
-          message_type: messageTypeToName(message.data?.type),
-        };
-
-        statsd().increment("gossip.message_failure", 1, tags);
-        log.info(
-          {
-            errCode: result.error.errCode,
-            errMsg: result.error.message,
-            peerId: source.toString(),
-            origin: peerIdResult.value,
-            hash: bytesToHexString(message.hash).unwrapOr(""),
-            fid: message.data?.fid,
-            type: message.data?.type,
-            gossipDelay: gossipMessageDelay,
-            valid: !reportedAsInvalid,
-            msgId,
-          },
-          "Received bad gossip message from peer",
-        );
-        if (!reportedAsInvalid) {
-          await this.gossipNode.reportValid(msgId, peerIdFromString(source.toString()).toBytes(), false);
-        }
+        // Return error, unknown type of message
+        return err(new HubError("bad_request.invalid_param", "Unknown message type while handlgGossipMessage"));
       }
-
-      statsd().timing("gossip.message_delay", gossipMessageDelay);
-      const mergeResult = result.isOk() ? "success" : "failure";
-      statsd().timing(`gossip.message_delay.${mergeResult}`, gossipMessageDelay);
-
-      return result.map(() => undefined);
     } else if (gossipMessage.contactInfoContent) {
       const result = await this.handleContactInfo(peerIdResult.value, gossipMessage.contactInfoContent);
       await this.gossipNode.reportValid(msgId, peerIdFromString(source.toString()).toBytes(), result);
@@ -1131,8 +1567,6 @@ export class Hub implements HubInterface {
   }
 
   private async handleContactInfo(peerId: PeerId, content: ContactInfoContent): Promise<boolean> {
-    statsd().gauge("peer_store.count", await this.gossipNode.peerStoreCount());
-
     let message: ContactInfoContentBody = content.body
       ? content.body
       : ContactInfoContentBody.create({
@@ -1148,6 +1582,7 @@ export class Hub implements HubInterface {
 
     // Don't process messages that are too old
     if (message.timestamp && message.timestamp < Date.now() - MAX_CONTACT_INFO_AGE_MS) {
+      statsd().increment("gossip.contact_info.too_old", 1);
       log.debug({ message }, "contact info message is too old");
       return false;
     }
@@ -1250,19 +1685,14 @@ export class Hub implements HubInterface {
     log.debug({ identity: this.identity, peer: peerId, message }, "received peer ContactInfo");
 
     // Check if we already have this client
-    const result = this.syncEngine.addContactInfoForPeerId(peerId, message);
+    const result = this.syncEngine.addContactInfoForPeerId(peerId, message, CONTACT_INFO_UPDATE_THRESHOLD_MS);
     if (result.isOk() && !this.performedFirstSync) {
-      // Should only sync last ~day worth of messages with new peers. For now, only sync with the first peer so we are upto
-      // date on startup.
-      log.debug({ peerInfo: message }, "New peer but only performing first sync");
-      const syncResult = await ResultAsync.fromPromise(
-        this.syncEngine.diffSyncIfRequired(this, peerId.toString()),
-        (e) => e,
-      );
-      if (syncResult.isErr()) {
-        log.error({ error: syncResult.error, peerId }, "Failed to sync with new peer");
-      }
+      // Sync with the first peer so we are upto date on startup.
+      log.info({ peerInfo: message }, "Performing first sync");
       this.performedFirstSync = true;
+      setTimeout(async () => {
+        await ResultAsync.fromPromise(this.syncEngine.diffSyncIfRequired(this), (e) => e);
+      }, FIRST_SYNC_DELAY);
     } else {
       log.debug({ peerInfo: message }, "Already have this peer, skipping sync");
     }
@@ -1278,12 +1708,12 @@ export class Hub implements HubInterface {
   /** Since we don't know if the peer is using SSL or not, we'll attempt to get the SSL version,
    *  and fall back to the non-SSL version
    */
-  private async getHubRpcClient(address: string, options?: Partial<ClientOptions>): Promise<HubRpcClient> {
+  public async getHubRpcClient(address: string, options?: Partial<ClientOptions>): Promise<HubRpcClient> {
     return new Promise((resolve) => {
       try {
         const sslClientResult = getSSLHubRpcClient(address, options);
 
-        sslClientResult.$.waitForReady(Date.now() + 2000, (err) => {
+        sslClientResult.$.waitForReady(Date.now() + 2000, (err: Error | undefined) => {
           if (!err) {
             resolve(sslClientResult);
           } else {
@@ -1330,7 +1760,7 @@ export class Hub implements HubInterface {
       }
     }
 
-    log.info({ peerId }, "falling back to addressbook lookup for peer");
+    log.info(new Tags({ peerId: peerId.toString() }), "falling back to addressbook lookup for peer");
     const peerAddresses = await this.gossipNode.getPeerAddresses(peerId);
     if (!peerAddresses) {
       log.info({ function: "getRPCClientForPeer", peer }, `failed to find peer's address to request simple sync`);
@@ -1383,11 +1813,15 @@ export class Hub implements HubInterface {
     });
 
     this.gossipNode.on("peerConnect", async () => {
+      // NB: Gossiping our own contact info is commented out, since at the time of
+      // writing this the p2p network has overwhelming number of peers and spends more
+      // time processing contact info than messages. We may uncomment in the future
+      // if peer counts drop.
       // When we connect to a new node, gossip out our contact info 1 second later.
       // The setTimeout is to ensure that we have a chance to receive the peer's info properly.
-      setTimeout(async () => {
-        await this.gossipContactInfo();
-      }, 1 * 1000);
+      // setTimeout(async () => {
+      //   await this.gossipContactInfo();
+      // }, 1 * 1000);
       statsd().increment("peer_connect.count");
     });
 
@@ -1396,29 +1830,222 @@ export class Hub implements HubInterface {
       this.syncEngine.removeContactInfoForPeerId(connection.remotePeer.toString());
       statsd().increment("peer_disconnect.count");
     });
+
+    this.gossipNode.on("peerDiscovery", async (peerInfo) => {
+      // NB: The current code is not in use - we would require a source to emit peerDiscovery events.
+      // This is a placeholder for future use.
+
+      // Add discovered peer to sync engine
+      const peerId = peerInfo.id;
+      const peerAddresses = peerInfo.multiaddrs;
+
+      // sorts addresses by Public IPs first
+      const addr = peerAddresses.sort((a: Multiaddr, b: Multiaddr) =>
+        publicAddressesFirst({ multiaddr: a, isCertified: false }, { multiaddr: b, isCertified: false }),
+      )[0];
+      if (addr === undefined) {
+        log.info(
+          { function: "peerDiscovery", peerId: peerId.toString() },
+          "peer found but no address is available to request sync",
+        );
+        return;
+      }
+      await this.gossipNode.addPeerToAddressBook(peerId, addr);
+    });
   }
 
   /* -------------------------------------------------------------------------- */
   /*                               RPC Handler API                              */
   /* -------------------------------------------------------------------------- */
 
+  async submitMessageBundle(
+    creationFarcasterTime: number,
+    messageBundle: MessageBundle,
+    source?: HubSubmitSource,
+    peerId?: PeerId,
+  ): Promise<HubResult<number>[]> {
+    if (this.syncEngine.syncTrieQSize > MAX_SYNCTRIE_QUEUE_SIZE) {
+      log.warn({ syncTrieQSize: this.syncEngine.syncTrieQSize }, "SubmitMessage rejected: Sync trie queue is full");
+      // Since we're rejecting the full bundle, return an error for each message
+      return messageBundle.messages.map(() =>
+        err(new HubError("unavailable.storage_failure", "Sync trie queue is full")),
+      );
+    }
+
+    if (messageBundle.messages.length > MAX_BUNDLE_SIZE) {
+      log.warn(
+        { bundleSize: messageBundle.messages.length, maxBundleSize: MAX_BUNDLE_SIZE },
+        "submitMessageBundle rejected: Message bundle is too large",
+      );
+      return messageBundle.messages.map(() =>
+        err(new HubError("bad_request.invalid_param", "Message bundle is too large")),
+      );
+    }
+
+    const start = Date.now();
+    const allResults: Map<number, HubResult<number>> = new Map();
+
+    const dedupedMessages: { i: number; message: Message }[] = [];
+    let earliestTimestamp = Infinity;
+    let latestTimestamp = -Infinity;
+    if (source === "gossip") {
+      // Go over all the messages and see if they are in the DB. If they are, don't bother processing them
+      const messagesExist = await areMessagesInDb(this.rocksDB, messageBundle.messages);
+
+      for (let i = 0; i < messagesExist.length; i++) {
+        if (messagesExist[i]) {
+          log.debug({ source }, "submitMessageBundle rejected: Message already exists");
+          allResults.set(i, err(new HubError("bad_request.duplicate", "message has already been merged")));
+        } else {
+          const message = ensureMessageData(messageBundle.messages[i] as Message);
+          earliestTimestamp = Math.min(earliestTimestamp, message.data?.timestamp ?? Infinity);
+          latestTimestamp = Math.max(latestTimestamp, message.data?.timestamp ?? -Infinity);
+          dedupedMessages.push({ i, message });
+        }
+      }
+    } else {
+      const initialResult = {
+        earliest: Infinity,
+        latest: -Infinity,
+        deduped: [] as { i: number; message: Message }[],
+      };
+      const { deduped, earliest, latest } = messageBundle.messages.reduce((acc, message, i) => {
+        const messageData = ensureMessageData(message);
+        acc.earliest = Math.min(acc.earliest, messageData.data?.timestamp ?? Infinity);
+        acc.latest = Math.max(acc.latest, messageData.data?.timestamp ?? -Infinity);
+        acc.deduped.push({ i, message: messageData });
+        return acc;
+      }, initialResult);
+      earliestTimestamp = earliest;
+      latestTimestamp = latest;
+      dedupedMessages.push(...deduped);
+    }
+    const tags: { [key: string]: string } = {
+      ...(source ? { source } : {}),
+      ...(peerId ? { peer_id: peerId.toString() } : {}),
+    };
+
+    statsd().gauge("hub.submit_message_bundle.size", dedupedMessages.length, tags);
+    statsd().gauge(
+      "hub.submit_message_bundle.earliest_timestamp_ms",
+      fromFarcasterTime(earliestTimestamp).unwrapOr(0),
+      tags,
+    );
+    statsd().gauge(
+      "hub.submit_message_bundle.latest_timestamp_ms",
+      fromFarcasterTime(latestTimestamp).unwrapOr(0),
+      tags,
+    );
+    statsd().gauge(
+      "hub.submit_message_bundle.creation_time_ms",
+      fromFarcasterTime(creationFarcasterTime).unwrapOr(0),
+      tags,
+    );
+    statsd().gauge("hub.submit_message_bundle.max_delay_ms", creationFarcasterTime - earliestTimestamp, tags);
+
+    // Merge the messages
+    const mergeResults = await this.engine.mergeMessages(dedupedMessages.map((m) => m.message));
+
+    const errorLogs: string[] = [];
+    const infoLogs: string[] = [];
+    for (const [j, result] of mergeResults.entries()) {
+      const message = dedupedMessages[j]?.message as Message;
+      const type = messageTypeToName(message.data?.type);
+
+      allResults.set(dedupedMessages[j]?.i as number, result);
+
+      result.match(
+        (eventId) => {
+          const parts = [
+            `event_id:${eventId}`,
+            `farcaster_ts:${message.data?.timestamp ?? "no-timestamp"}`,
+            `fid:${message.data?.fid ?? "no-fid"}`,
+            `hash:${bytesToHexString(message.hash).unwrapOr("no-hash")}`,
+            `message_type:${type}`,
+            `source:${source}`,
+          ];
+          infoLogs.push(`[${parts.join("|")}]`);
+          statsd().increment("submit_message.success", 1, { message_type: type, source: source ?? "unknown-source" });
+        },
+        (e) => {
+          const parts = [
+            `farcaster_ts:${message.data?.timestamp ?? "no-timestamp"}`,
+            `fid:${message.data?.fid ?? "no-fid"}`,
+            `hash:${bytesToHexString(message.hash).unwrapOr("no-hash")}`,
+            `message_type:${type}`,
+            `source:${source ?? "unknown-source"}`,
+            `error:${e.message}`,
+            `error_code:${e.errCode}`,
+          ];
+          errorLogs.push(`[${parts.join("|")}]`);
+
+          const tags: { [key: string]: string } = {
+            error_code: e.errCode,
+            message_type: type,
+            source: source ?? "unknown-source",
+          };
+          statsd().increment("submit_message.error", 1, tags);
+        },
+      );
+    }
+    if (infoLogs.length > 0) {
+      log.info(infoLogs, "successful submit messages");
+    }
+    if (errorLogs.length > 0) {
+      log.error(errorLogs, "failed submit messages");
+    }
+
+    // Convert the merge results to an Array of HubResults with the key
+    const finalResults: HubResult<number>[] = [];
+    const finalFailures = new Map<string, number>();
+    let success = 0;
+    for (let i = 0; i < allResults.size; i++) {
+      const result = allResults.get(i) as HubResult<number>;
+      if (result.isOk()) {
+        success += 1;
+      } else {
+        const errCode = result.error.errCode;
+        const count = finalFailures.get(errCode) ?? 0;
+        finalFailures.set(errCode, count + 1);
+      }
+      finalResults.push(result);
+    }
+
+    const totalTimeMilis = Date.now() - start;
+    statsd().timing("hub.merge_message", totalTimeMilis / finalResults.length);
+
+    // When submitting a messageBundle via RPC, we want to gossip it to other nodes
+    if (success > 0 && source === "rpc") {
+      void this.gossipNode.gossipBundle(messageBundle);
+    }
+
+    log.info(
+      {
+        hash: bytesToHexString(messageBundle.hash).unwrapOr(messageBundle.hash),
+        source,
+        success,
+        finalFailures: [...finalFailures],
+        total: finalResults.length,
+        totalTimeMilis,
+        timePerMergeMs: Math.round((10 ** 2 * totalTimeMilis) / finalResults.length) / 10 ** 2, // round to 2 places
+      },
+      "submitMessageBundle merged",
+    );
+
+    return finalResults;
+  }
+
   async submitMessage(submittedMessage: Message, source?: HubSubmitSource): HubAsyncResult<number> {
+    if (this.syncEngine.syncTrieQSize > MAX_SYNCTRIE_QUEUE_SIZE) {
+      log.warn({ syncTrieQSize: this.syncEngine.syncTrieQSize }, "SubmitMessage rejected: Sync trie queue is full");
+      return err(new HubError("unavailable.storage_failure", "Sync trie queue is full"));
+    }
+
     // If this is a dup, don't bother processing it. Only do this for gossip messages since rpc messages
     // haven't been validated yet
     if (source === "gossip" && (await isMessageInDB(this.rocksDB, submittedMessage))) {
       log.debug({ source }, "submitMessage rejected: Message already exists");
       return err(new HubError("bad_request.duplicate", "message has already been merged"));
-    }
-
-    // message is a reserved key in some logging systems, so we use submittedMessage instead
-    const logMessage = log.child({
-      submittedMessage: messageToLog(submittedMessage),
-      source,
-    });
-
-    if (this.syncEngine.syncTrieQSize > MAX_MESSAGE_QUEUE_SIZE) {
-      log.warn({ syncTrieQSize: this.syncEngine.syncTrieQSize }, "SubmitMessage rejected: Sync trie queue is full");
-      return err(new HubError("unavailable.storage_failure", "Sync trie queue is full"));
     }
 
     const start = Date.now();
@@ -1429,23 +2056,34 @@ export class Hub implements HubInterface {
 
     mergeResult.match(
       (eventId) => {
-        const logData = {
-          eventId,
-          fid: message.data?.fid,
-          type: type,
-          submittedMessage: messageToLog(submittedMessage),
-          source,
-        };
-        const msg = "submitMessage success";
+        statsd().increment("submit_message.success", 1, { message_type: type, source: source ?? "unknown-source" });
 
-        if (source === "sync") {
-          log.debug(logData, msg);
+        if (this.options.logIndividualMessages) {
+          const logData = {
+            eventId,
+            fid: message.data?.fid,
+            type: type,
+            submittedMessage: messageToLog(submittedMessage),
+            source,
+          };
+          const msg = "submitMessage success";
+
+          if (source === "sync") {
+            log.debug(logData, msg);
+          } else {
+            log.info(logData, msg);
+          }
         } else {
-          log.info(logData, msg);
+          this.submitMessageLogger.log(source ?? "unknown-source");
         }
       },
       (e) => {
-        logMessage.warn({ errCode: e.errCode, source }, `submitMessage error: ${e.message}`);
+        // message is a reserved key in some logging systems, so we use submittedMessage instead
+        const logMessage = log.child({
+          submittedMessage: messageToLog(submittedMessage),
+          source,
+        });
+        logMessage.warn({ errCode: e.errCode, source, errMessage: e.message }, `submitMessage error: ${e.message}`);
         const tags: { [key: string]: string } = {
           error_code: e.errCode,
           message_type: type,
@@ -1462,7 +2100,6 @@ export class Hub implements HubInterface {
 
     const now = Date.now();
     statsd().timing("hub.merge_message", now - start);
-    statsd().timing(`hub.merge_message.${type}`, now - start);
 
     return mergeResult;
   }
@@ -1520,19 +2157,37 @@ export class Hub implements HubInterface {
     return mergeResult;
   }
 
-  async writeHubCleanShutdown(clean: boolean): HubAsyncResult<void> {
+  // Create an enum for hub shutdown reasons
+
+  async writeHubCleanShutdown(clean: boolean, reason: HubShutdownReason): HubAsyncResult<void> {
     const txn = this.rocksDB.transaction();
-    const value = clean ? Buffer.from([1]) : Buffer.from([0]);
+    const value = clean ? Buffer.from([1, reason]) : Buffer.from([0, reason]);
     txn.put(Buffer.from([RootPrefix.HubCleanShutdown]), value);
 
     return ResultAsync.fromPromise(this.rocksDB.commit(txn), (e) => e as HubError);
   }
 
   async wasHubCleanShutdown(): HubAsyncResult<boolean> {
-    return ResultAsync.fromPromise(
+    const shutdownResult = await ResultAsync.fromPromise(
       this.rocksDB.get(Buffer.from([RootPrefix.HubCleanShutdown])),
       (e) => e as HubError,
-    ).map((value) => value?.[0] === 1);
+    );
+    if (shutdownResult.isErr()) {
+      return err(shutdownResult.error);
+    }
+    const shutdownReason = shutdownResult.value[1] ?? -1;
+    const cleanShutdown = shutdownResult.value[0] === 1;
+    // Anything other than HubShutdownReason.SELF_TERMINATED or SIG_TERM is considered unexpected
+    const unexpected = shutdownReason > 1;
+    const tags: { [key: string]: string } = {
+      reason: shutdownReason.toString(),
+      clean: cleanShutdown.toString(),
+      unexpected: unexpected.toString(),
+    };
+    statsd().increment("hub.restart", 1, tags);
+    logger.info({ clean: cleanShutdown, reason: shutdownReason, unexpected }, "Hub restarted");
+
+    return ok(cleanShutdown);
   }
 
   async getDbNetwork(): HubAsyncResult<FarcasterNetwork | undefined> {
@@ -1607,155 +2262,5 @@ export class Hub implements HubInterface {
   private getSnapshotFolder(prevVersionCounter?: number): string {
     const network = FarcasterNetwork[this.options.network].toString();
     return `snapshots/${network}/DB_SCHEMA_${LATEST_DB_SCHEMA_VERSION - (prevVersionCounter ?? 0)}`;
-  }
-
-  async uploadToS3(tarFilePath: string): HubAsyncResult<string> {
-    let start = Date.now();
-    log.info({ tarFilePath }, "Creating tar.gz file ...");
-
-    // First, gzip the file. Do it in rust, which can run the CPU intensive gzip in a separate thread
-    const gzipResult = await ResultAsync.fromPromise(rsCreateTarGzip(tarFilePath), rustErrorToHubError);
-    if (gzipResult.isErr()) {
-      log.error({ error: gzipResult.error }, "Error creating tar.gz file");
-      return err(gzipResult.error);
-    }
-
-    log.info({ timeTakenMs: Date.now() - start, gzipResult }, "Finished creating tar.gz file created");
-    const filePath = gzipResult.value;
-
-    const s3 = new S3Client({
-      region: S3_REGION,
-    });
-
-    // The AWS key is "snapshots/{network}/{DB_SCHEMA_VERSION}/snapshot-{yyyy-mm-dd}-{timestamp}.tar.gz"
-    const key = `${this.getSnapshotFolder()}/snapshot-${new Date().toISOString().split("T")[0]}-${Math.floor(
-      Date.now() / 1000,
-    )}.tar.gz`;
-
-    start = Date.now();
-    log.info({ filePath, key }, "Uploading snapshot to S3");
-
-    const fileStream = fs.createReadStream(filePath);
-    fileStream.on("error", function (err) {
-      log.error(`S3 File Error: ${err}`);
-    });
-
-    // The targz should be uploaded via multipart upload to S3
-    const targzParams = new Upload({
-      client: s3,
-      params: {
-        Bucket: this.s3_snapshot_bucket,
-        Key: key,
-        Body: fileStream,
-      },
-      queueSize: 4, // 4 concurrent uploads
-      partSize: 1000 * 1024 * 1024, // 1 GB
-    });
-
-    const latestJsonParams = {
-      Bucket: this.s3_snapshot_bucket,
-      Key: `${this.getSnapshotFolder()}/latest.json`,
-      Body: JSON.stringify({
-        key,
-        timestamp: Date.now(),
-        serverDate: new Date().toISOString(),
-      }),
-    };
-
-    targzParams.on("httpUploadProgress", (progress) => {
-      log.info({ progress }, "Uploading snapshot to S3");
-    });
-
-    try {
-      await targzParams.done();
-      await s3.send(new PutObjectCommand(latestJsonParams));
-      log.info({ key, timeTakenMs: Date.now() - start }, "Snapshot uploaded to S3");
-      return ok(key);
-    } catch (e: unknown) {
-      return err(new HubError("unavailable.network_failure", (e as Error).message));
-    }
-  }
-
-  async listS3Snapshots(): HubAsyncResult<
-    Array<{
-      Key: string | undefined;
-      Size: number | undefined;
-      LastModified: Date | undefined;
-    }>
-  > {
-    const network = FarcasterNetwork[this.options.network].toString();
-
-    const s3 = new S3Client({
-      region: S3_REGION,
-    });
-
-    // Note: We get the snapshots across all DB_SCHEMA versions
-    // when determining which snapshots to delete, we only delete snapshots from the current DB_SCHEMA version
-    const params = {
-      Bucket: this.s3_snapshot_bucket,
-      Prefix: `snapshots/${network}/`,
-    };
-
-    try {
-      const response = await s3.send(new ListObjectsV2Command(params));
-
-      if (response.Contents) {
-        return ok(
-          response.Contents.map((item) => ({
-            Key: item.Key,
-            Size: item.Size,
-            LastModified: item.LastModified,
-          })),
-        );
-      } else {
-        return ok([]);
-      }
-    } catch (e: unknown) {
-      return err(new HubError("unavailable.network_failure", (e as Error).message));
-    }
-  }
-
-  async deleteOldSnapshotsFromS3(): HubAsyncResult<void> {
-    try {
-      const fileListResult = await this.listS3Snapshots();
-
-      if (!fileListResult.isOk()) {
-        return err(new HubError("unavailable.network_failure", fileListResult.error.message));
-      }
-
-      if (fileListResult.value.length < 2) {
-        log.warn({ fileList: fileListResult.value }, "Not enough snapshot files to delete");
-        return ok(undefined);
-      }
-
-      const oneMonthAgo = new Date();
-      oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
-
-      const oldFiles = fileListResult.value
-        .filter((file) => (file.LastModified ? new Date(file.LastModified) < oneMonthAgo : false))
-        .slice(0, 10);
-
-      if (oldFiles.length === 0) {
-        return ok(undefined);
-      }
-
-      log.warn({ oldFiles }, "Deleting old snapshot files from S3");
-
-      const deleteParams = {
-        Bucket: this.s3_snapshot_bucket,
-        Delete: {
-          Objects: oldFiles.map((file) => ({ Key: file.Key })),
-        },
-      };
-
-      const s3 = new S3Client({
-        region: S3_REGION,
-      });
-
-      await s3.send(new DeleteObjectsCommand(deleteParams));
-      return ok(undefined);
-    } catch (e: unknown) {
-      return err(new HubError("unavailable.network_failure", (e as Error).message));
-    }
   }
 }

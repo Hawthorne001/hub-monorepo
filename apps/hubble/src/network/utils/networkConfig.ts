@@ -27,6 +27,7 @@ export type NetworkConfig = {
   keyRegistryV2Address: `0x${string}` | undefined;
   idRegistryV2Address: `0x${string}` | undefined;
   solanaVerificationsEnabled: boolean | undefined;
+  useStreaming: boolean | undefined;
 };
 
 export type NetworkConfigResult = {
@@ -37,6 +38,7 @@ export type NetworkConfigResult = {
   strictNoSign: boolean | undefined;
   shouldExit: boolean;
   solanaVerificationsEnabled: boolean | undefined;
+  useStreaming: boolean | undefined;
 };
 
 export async function fetchNetworkConfig(): HubAsyncResult<NetworkConfig> {
@@ -95,6 +97,7 @@ export function applyNetworkConfig(
   strictContactInfoValidation: boolean | undefined,
   strictNoSign: boolean | undefined,
   solanaVerificationsEnabled: boolean | undefined,
+  useStreaming: boolean | undefined,
 ): NetworkConfigResult {
   if (networkConfig.network !== currentNetwork) {
     log.error({ networkConfig, network: currentNetwork }, "network config mismatch");
@@ -106,6 +109,7 @@ export function applyNetworkConfig(
       strictNoSign,
       shouldExit: false,
       solanaVerificationsEnabled,
+      useStreaming,
     };
   }
 
@@ -114,7 +118,7 @@ export function applyNetworkConfig(
 
   if (semver.valid(minAppVersion)) {
     if (semver.lt(APP_VERSION, minAppVersion)) {
-      const errMsg = "Hubble version is too old too start. Please update your node.";
+      const errMsg = "Hubble version is too old to start. Please update your node.";
       log.fatal({ minAppVersion, ourVersion: APP_VERSION }, errMsg);
       return {
         allowedPeerIds,
@@ -124,6 +128,7 @@ export function applyNetworkConfig(
         strictNoSign,
         shouldExit: true,
         solanaVerificationsEnabled,
+        useStreaming,
       };
     }
   } else {
@@ -163,5 +168,6 @@ export function applyNetworkConfig(
     strictNoSign: strictNoSign || !!networkConfig.strictNoSign,
     shouldExit: false,
     solanaVerificationsEnabled: solanaVerificationsEnabled || networkConfig.solanaVerificationsEnabled,
+    useStreaming: useStreaming || networkConfig.useStreaming,
   };
 }

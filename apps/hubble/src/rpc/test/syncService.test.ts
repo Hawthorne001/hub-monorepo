@@ -4,6 +4,7 @@ import {
   Factories,
   FarcasterNetwork,
   getInsecureHubRpcClient,
+  HubError,
   HubInfoRequest,
   HubRpcClient,
   OnChainEvent,
@@ -14,6 +15,7 @@ import { MockHub } from "../../test/mocks.js";
 import Server from "../server.js";
 import SyncEngine from "../../network/sync/syncEngine.js";
 import { GossipNode } from "../../network/p2p/gossipNode.js";
+import { sleepWhile, SLEEPWHILE_TIMEOUT } from "../../utils/crypto.js";
 
 const db = jestRocksDB("protobufs.rpc.syncService.test");
 const network = FarcasterNetwork.TESTNET;
@@ -40,6 +42,10 @@ afterAll(async () => {
   await syncEngine.stop();
   await server.stop();
   await engine.stop();
+});
+
+beforeEach(async () => {
+  await syncEngine.trie.clear();
 });
 
 const fid = Factories.Fid.build();
@@ -71,11 +77,14 @@ describe("getInfo", () => {
     await engine.mergeMessage(castAdd);
     await engine.mergeMessage(castAdd2);
 
+    await sleepWhile(() => syncEngine.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+
     const result = await client.getInfo(HubInfoRequest.create({ dbStats: true }));
     expect(result.isOk()).toBeTruthy();
     expect(result._unsafeUnwrap().dbStats?.numMessages).toEqual(5); // Currently returns all items in the trie (3 events + 2 messages)
     expect(result._unsafeUnwrap().dbStats?.numFidEvents).toEqual(1);
     expect(result._unsafeUnwrap().dbStats?.numFnameEvents).toEqual(0);
+    expect(result._unsafeUnwrap().dbStats?.approxSize).toBeGreaterThan(0);
   });
 });
 
@@ -90,5 +99,21 @@ describe("getSyncStatus", () => {
     expect(result.isOk()).toBeTruthy();
     expect(result._unsafeUnwrap().isSyncing).toEqual(false);
     expect(result._unsafeUnwrap().syncStatus).toHaveLength(0);
+  });
+});
+
+describe("stopSync", () => {
+  test("succeeds", async () => {
+    const result = await client.stopSync({});
+    expect(result.isOk()).toBeTruthy();
+    expect(result._unsafeUnwrap().isSyncing).toEqual(false);
+    expect(result._unsafeUnwrap().syncStatus).toHaveLength(0);
+  });
+});
+
+describe("forceSync", () => {
+  test("fails when peer is not found", async () => {
+    const result = await client.forceSync(SyncStatusRequest.create({ peerId: "test" }));
+    expect(result._unsafeUnwrapErr()).toEqual(new HubError("bad_request", "Peer not found"));
   });
 });

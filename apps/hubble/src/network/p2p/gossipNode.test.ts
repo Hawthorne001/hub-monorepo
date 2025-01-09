@@ -15,11 +15,10 @@ import Server from "../../rpc/server.js";
 import { jestRocksDB } from "../../storage/db/jestUtils.js";
 import { MockHub } from "../../test/mocks.js";
 import SyncEngine from "../sync/syncEngine.js";
-import { PeerId } from "@libp2p/interface-peer-id";
+import { PeerId } from "@libp2p/interface";
 import { sleepWhile } from "../../utils/crypto.js";
 import { createEd25519PeerId } from "@libp2p/peer-id-factory";
 import { LibP2PNode } from "./gossipNodeWorker.js";
-import { ResultAsync } from "neverthrow";
 
 const TEST_TIMEOUT_SHORT = 10 * 1000;
 const TEST_TIMEOUT_LONG = 30 * 1000;
@@ -46,8 +45,8 @@ describe("GossipNode", () => {
   });
 
   test("start fails if multiaddr format is invalid", async () => {
-    // an IPv6 being supplied as an IPv4
-    const options = { ipMultiAddr: "/ip4/2600:1700:6cf0:990:2052:a166:fb35:830a" };
+    // an IPv6 being supplied as an onion3
+    const options = { ipMultiAddr: "/onion3/2600:1700:6cf0:990:2052:a166:fb35:830a" };
     expect((await node.start([], options))._unsafeUnwrapErr().errCode).toEqual("unavailable");
     const error = (await node.start([], options))._unsafeUnwrapErr();
 
@@ -173,6 +172,7 @@ describe("GossipNode", () => {
       const hub = new MockHub(db, undefined, mockGossipNode);
 
       const syncEngine = new SyncEngine(hub, db);
+      await syncEngine.start();
       server = new Server(hub, hub.engine, syncEngine, mockGossipNode);
       const port = await server.start();
       client = getInsecureHubRpcClient(`127.0.0.1:${port}`);
@@ -199,9 +199,9 @@ describe("GossipNode", () => {
 
     test("Gossip Ids match for farcaster protocol messages", async () => {
       await node.start([]);
-      await node.gossipMessage(castAdd);
+      await node.broadcastMessage(castAdd);
       // should be detected as a duplicate
-      const res = await node.gossipMessage(castAdd);
+      const res = await node.broadcastMessage(castAdd);
 
       expect(res.isErr()).toBeTruthy();
       expect(res._unsafeUnwrapErr().errCode).toEqual("bad_request.duplicate");

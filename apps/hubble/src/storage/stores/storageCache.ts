@@ -1,4 +1,6 @@
 import {
+  getStorageUnitExpiry,
+  getStorageUnitType,
   HubError,
   HubEvent,
   isMergeMessageHubEvent,
@@ -10,24 +12,37 @@ import {
   Message,
   OnChainEventType,
   StorageRentOnChainEvent,
+  StorageUnitType,
+  toFarcasterTime,
 } from "@farcaster/hub-nodejs";
 import { err, ok } from "neverthrow";
 import RocksDB from "../db/rocksdb.js";
-import { FID_BYTES, OnChainEventPostfix, RootPrefix, UserMessagePostfix, UserMessagePostfixMax } from "../db/types.js";
+import { FID_BYTES, OnChainEventPostfix, RootPrefix, UserMessagePostfix } from "../db/types.js";
 import { logger } from "../../utils/logger.js";
 import { makeFidKey, makeMessagePrimaryKey, makeTsHash, typeToSetPostfix } from "../db/message.js";
 import { bytesCompare, getFarcasterTime, HubAsyncResult } from "@farcaster/core";
 import { forEachOnChainEvent } from "../db/onChainEvent.js";
 import { addProgressBar } from "../../utils/progressBars.js";
-import { sleep } from "../../utils/crypto.js";
+
+const MAX_PENDING_MESSAGE_COUNT_SCANS = 100;
 
 const makeKey = (fid: number, set: UserMessagePostfix): string => {
   return Buffer.concat([makeFidKey(fid), Buffer.from([set])]).toString("hex");
 };
 
+const storageSlotFromEvent = (event: StorageRentOnChainEvent): StorageSlot => {
+  const isLegacy = getStorageUnitType(event) === StorageUnitType.UNIT_TYPE_LEGACY;
+  return {
+    units: isLegacy ? 0 : event.storageRentEventBody.units,
+    legacy_units: isLegacy ? event.storageRentEventBody.units : 0,
+    invalidateAt: toFarcasterTime(getStorageUnitExpiry(event) * 1000).unwrapOr(0),
+  };
+};
+
 const log = logger.child({ component: "StorageCache" });
 
-type StorageSlot = {
+export type StorageSlot = {
+  legacy_units: number;
   units: number;
   invalidateAt: number;
 };
@@ -35,9 +50,10 @@ type StorageSlot = {
 export class StorageCache {
   private _db: RocksDB;
   private _counts: Map<string, number>;
+  private _pendingMessageCountScans = new Map<string, Promise<number>>();
+
   private _earliestTsHashes: Map<string, Uint8Array>;
   private _activeStorageSlots: Map<number, StorageSlot>;
-  private prepopulateComplete = false;
 
   constructor(db: RocksDB, usage?: Map<string, number>) {
     this._counts = usage ?? new Map();
@@ -51,13 +67,8 @@ export class StorageCache {
 
     const start = Date.now();
 
-    let totalFids = 0;
-
-    await this._db.forEachIteratorByPrefix(
+    const totalFids = await this._db.countKeysAtPrefix(
       Buffer.concat([Buffer.from([RootPrefix.OnChainEvent, OnChainEventPostfix.IdRegisterByFid])]),
-      () => {
-        totalFids++;
-      },
     );
 
     const progressBar = addProgressBar("Syncing storage cache", totalFids * 2);
@@ -68,15 +79,25 @@ export class StorageCache {
     } else {
       await forEachOnChainEvent(this._db, OnChainEventType.EVENT_TYPE_STORAGE_RENT, (event) => {
         const existingSlot = this._activeStorageSlots.get(event.fid);
-        if (isStorageRentOnChainEvent(event) && event.storageRentEventBody.expiry > time.value) {
-          const rentEventBody = event.storageRentEventBody;
-          this._activeStorageSlots.set(event.fid, {
-            units: rentEventBody.units + (existingSlot?.units ?? 0),
-            invalidateAt:
-              (existingSlot?.invalidateAt ?? rentEventBody.expiry) < rentEventBody.expiry
-                ? existingSlot?.invalidateAt ?? rentEventBody.expiry
-                : rentEventBody.expiry,
-          });
+        if (isStorageRentOnChainEvent(event)) {
+          const rentEventSlot = storageSlotFromEvent(event);
+
+          if (rentEventSlot.invalidateAt < time.value) {
+            return;
+          }
+
+          if (existingSlot) {
+            this._activeStorageSlots.set(event.fid, {
+              units: rentEventSlot.units + existingSlot.units,
+              legacy_units: rentEventSlot.legacy_units + existingSlot.legacy_units,
+              invalidateAt:
+                existingSlot.invalidateAt < rentEventSlot.invalidateAt
+                  ? existingSlot.invalidateAt
+                  : rentEventSlot.invalidateAt,
+            });
+          } else {
+            this._activeStorageSlots.set(event.fid, rentEventSlot);
+          }
           progressBar?.increment();
         }
       });
@@ -89,68 +110,52 @@ export class StorageCache {
     this._earliestTsHashes = new Map();
 
     // Start prepopulating the cache in the background
-    this.prepopulateMessageCounts();
+    if (this._db.status !== "open") {
+      log.error("cannot prepopulate message counts, db is not open");
+      throw new HubError("unavailable.storage_failure", "cannot prepopulate message counts, db is not open");
+    }
 
     log.info({ timeTakenMs: Date.now() - start }, "storage cache synced");
   }
 
-  async prepopulateMessageCounts(): Promise<void> {
-    let prevFid = 0;
-    let prevPostfix = 0;
-    let totalFids = 0;
-
-    const start = Date.now();
-    log.info("starting storage cache prepopulation");
-
-    const prefix = Buffer.from([RootPrefix.User]);
-    await this._db.forEachIteratorByPrefix(prefix, async (key) => {
-      const postfix = (key as Buffer).readUint8(1 + FID_BYTES);
-      if (postfix < UserMessagePostfixMax) {
-        const fid = (key as Buffer).subarray(1, 1 + FID_BYTES).readUInt32BE();
-
-        if (prevFid !== fid || prevPostfix !== postfix) {
-          await this.getMessageCount(fid, postfix);
-
-          if (prevFid !== fid) {
-            totalFids += 1;
-            // Sleep to allow other threads to run between each fid
-            await sleep(1);
-          }
-
-          prevFid = fid;
-          prevPostfix = postfix;
-        }
-      }
-    });
-    this.prepopulateComplete = true;
-    log.info({ timeTakenMs: Date.now() - start, totalFids }, "storage cache prepopulation finished");
-  }
-
   async getMessageCount(fid: number, set: UserMessagePostfix, forceFetch = true): HubAsyncResult<number> {
     const key = makeKey(fid, set);
-    if (this._counts.get(key) === undefined && forceFetch) {
-      let total = 0;
-      await this._db.forEachIteratorByPrefix(makeMessagePrimaryKey(fid, set), () => {
-        total += 1;
-      });
 
-      // Recheck the count in case it was set by another thread (i.e. no race conditions)
-      if (this._counts.get(key) === undefined) {
-        this._counts.set(key, total);
-        if (this.prepopulateComplete) {
-          log.debug({ fid, set, total }, `storage cache miss for fid: ${fid}`);
-        }
-      }
+    const pendingPromise = this._pendingMessageCountScans.get(key);
+    if (pendingPromise) {
+      return ok((await pendingPromise) ?? 0);
     }
 
-    return ok(this._counts.get(key) ?? 0);
+    if (this._counts.get(key) === undefined && forceFetch) {
+      if (this._pendingMessageCountScans.size > MAX_PENDING_MESSAGE_COUNT_SCANS) {
+        return err(new HubError("unavailable.storage_failure", "too many pending message count scans"));
+      }
+
+      const countPromise = new Promise<number>((resolve) => {
+        (async () => {
+          const total = await this._db.countKeysAtPrefix(makeMessagePrimaryKey(fid, set));
+
+          // We should maybe turn this into a LRU cache, otherwise it scales by the number
+          // of fids*set types.
+          this._counts.set(key, total);
+
+          resolve(total);
+          this._pendingMessageCountScans.delete(key);
+        })();
+      });
+
+      this._pendingMessageCountScans.set(key, countPromise);
+      return ok(await countPromise);
+    } else {
+      return ok(this._counts.get(key) ?? 0);
+    }
   }
 
-  async getCurrentStorageUnitsForFid(fid: number): HubAsyncResult<number> {
+  async getCurrentStorageSlotForFid(fid: number): HubAsyncResult<StorageSlot> {
     let slot = this._activeStorageSlots.get(fid);
 
     if (!slot) {
-      return ok(0);
+      return ok({ units: 0, legacy_units: 0, invalidateAt: 0 });
     }
 
     const time = getFarcasterTime();
@@ -160,19 +165,19 @@ export class StorageCache {
     }
 
     if (slot.invalidateAt < time.value) {
-      const newSlot = { units: 0, invalidateAt: time.value + 365 * 24 * 60 * 60 };
+      const newSlot = { units: 0, legacy_units: 0, invalidateAt: time.value + 365 * 24 * 60 * 60 };
       await forEachOnChainEvent(
         this._db,
         OnChainEventType.EVENT_TYPE_STORAGE_RENT,
         (event) => {
           if (isStorageRentOnChainEvent(event)) {
-            const rentEventBody = event.storageRentEventBody;
-            if (rentEventBody.expiry < time.value) return;
-            if (newSlot.invalidateAt > rentEventBody.expiry) {
-              newSlot.invalidateAt = rentEventBody.expiry;
+            const rentEventSlot = storageSlotFromEvent(event);
+            if (rentEventSlot.invalidateAt < time.value) return;
+            if (newSlot.invalidateAt > rentEventSlot.invalidateAt) {
+              newSlot.invalidateAt = rentEventSlot.invalidateAt;
             }
-
-            newSlot.units += rentEventBody.units;
+            newSlot.units += rentEventSlot.units;
+            newSlot.legacy_units += rentEventSlot.legacy_units;
           }
         },
         fid,
@@ -181,7 +186,7 @@ export class StorageCache {
       this._activeStorageSlots.set(fid, slot);
     }
 
-    return ok(slot.units);
+    return ok(slot);
   }
 
   async getEarliestTsHash(fid: number, set: UserMessagePostfix): HubAsyncResult<Uint8Array | undefined> {
@@ -198,10 +203,14 @@ export class StorageCache {
       const prefix = makeMessagePrimaryKey(fid, set);
 
       let firstKey: Buffer | undefined;
-      await this._db.forEachIteratorByPrefix(prefix, (key) => {
-        firstKey = key as Buffer;
-        return true; // Finish the iteration after the first key-value pair
-      });
+      await this._db.forEachIteratorByPrefix(
+        prefix,
+        (key) => {
+          firstKey = key as Buffer;
+          return true; // Finish the iteration after the first key-value pair
+        },
+        { pageSize: 1 },
+      );
 
       if (firstKey === undefined) {
         return ok(undefined);
@@ -246,7 +255,18 @@ export class StorageCache {
       const set = typeToSetPostfix(message.data.type);
       const fid = message.data.fid;
       const key = makeKey(fid, set);
-      const count = this._counts.get(key) ?? (await this.getMessageCount(fid, set)).unwrapOr(0);
+      let count = this._counts.get(key);
+
+      if (count === undefined) {
+        const msgCountResult = await this.getMessageCount(fid, set);
+
+        if (msgCountResult.isErr()) {
+          log.error({ err: msgCountResult.error }, "could not get message count");
+          return;
+        }
+        count = msgCountResult.value;
+      }
+
       this._counts.set(key, count + 1);
 
       const tsHashResult = makeTsHash(message.data.timestamp, message.hash);
@@ -266,12 +286,18 @@ export class StorageCache {
       const set = typeToSetPostfix(message.data.type);
       const fid = message.data.fid;
       const key = makeKey(fid, set);
-      const count = this._counts.get(key) ?? (await this.getMessageCount(fid, set)).unwrapOr(0);
-      if (count === 0) {
-        log.error(`error: ${set} store message count is already at 0 for fid ${fid}`);
-      } else {
-        this._counts.set(key, count - 1);
+
+      let count = this._counts.get(key);
+      if (count === undefined) {
+        const msgCountResult = await this.getMessageCount(fid, set);
+        if (msgCountResult.isErr()) {
+          log.error({ err: msgCountResult.error }, "could not get message count");
+          return;
+        }
+        count = msgCountResult.value;
       }
+
+      this._counts.set(key, count - 1);
 
       const tsHashResult = makeTsHash(message.data.timestamp, message.hash);
       if (!tsHashResult.isOk()) {
@@ -294,20 +320,23 @@ export class StorageCache {
         return;
       }
 
-      const rentEventBody = event.storageRentEventBody;
-      if (time.value > (existingSlot?.invalidateAt ?? 0)) {
+      const rentEventSlot = storageSlotFromEvent(event);
+      // If the storage unit has already expired, ignore
+      if (rentEventSlot.invalidateAt < time.value) {
+        return;
+      }
+
+      if (existingSlot) {
         this._activeStorageSlots.set(event.fid, {
-          units: rentEventBody.units,
-          invalidateAt: rentEventBody.expiry,
+          units: rentEventSlot.units + existingSlot.units,
+          legacy_units: rentEventSlot.legacy_units + existingSlot.legacy_units,
+          invalidateAt:
+            existingSlot.invalidateAt < rentEventSlot.invalidateAt
+              ? existingSlot.invalidateAt
+              : rentEventSlot.invalidateAt,
         });
       } else {
-        this._activeStorageSlots.set(event.fid, {
-          units: rentEventBody.units + (existingSlot?.units ?? 0),
-          invalidateAt:
-            (existingSlot?.invalidateAt ?? rentEventBody.expiry) < rentEventBody.expiry
-              ? existingSlot?.invalidateAt ?? rentEventBody.expiry
-              : rentEventBody.expiry,
-        });
+        this._activeStorageSlots.set(event.fid, rentEventSlot);
       }
     }
   }

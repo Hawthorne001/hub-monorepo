@@ -1,5 +1,195 @@
 # @farcaster/hub-nodejs
 
+## 0.12.7
+
+### Patch Changes
+
+- 913c0f67: feat: support twitter and github usernames
+- Updated dependencies [913c0f67]
+  - @farcaster/core@0.15.6
+
+## 0.12.6
+
+### Patch Changes
+
+- 91b77204: Add createDefaultMetadataKeyInterceptor
+
+## 0.12.5
+
+### Patch Changes
+
+- aa9cde75: feat: add user location to the protocol
+- Updated dependencies [aa9cde75]
+  - @farcaster/core@0.15.5
+
+## 0.12.4
+
+### Patch Changes
+
+- Updated dependencies [a8736e1d]
+  - @farcaster/core@0.15.4
+
+## 0.12.3
+
+### Patch Changes
+
+- e5a86114: feat: support bulk message writing rpcs
+- Updated dependencies [f084daa1]
+- Updated dependencies [e5a86114]
+  - @farcaster/core@0.15.3
+
+## 0.12.2
+
+### Patch Changes
+
+- 321658b7: support streaming for sync/reconciliation
+- Updated dependencies [321658b7]
+  - @farcaster/core@0.15.2
+
+## 0.12.1
+
+### Patch Changes
+
+- cc0d0a3e: feat: added start/stop time filters for bulk queries
+- Updated dependencies [fbd3ba5f]
+- Updated dependencies [cc0d0a3e]
+  - @farcaster/core@0.15.1
+
+## 0.12.0
+
+### Minor Changes
+
+- dd634c79: feat: Implement Storage Extension FIP
+
+### Patch Changes
+
+- Updated dependencies [dd634c79]
+  - @farcaster/core@0.15.0
+
+## 0.11.24
+
+### Patch Changes
+
+- 47fbd34e: fix: adjust grpc keepalive time to 5s to encourage faster failover from uncooperative peers
+
+## 0.11.23
+
+### Patch Changes
+
+- 939dde84: chore: upgrade viem to v2
+- Updated dependencies [61959467]
+- Updated dependencies [939dde84]
+  - @farcaster/core@0.14.20
+
+## 0.11.22
+
+### Patch Changes
+
+- 2fa29ad4: fix: Upgrade grpc-js to 1.11
+
+## 0.11.21
+
+### Patch Changes
+
+- Updated dependencies [76ad1ac2]
+  - @farcaster/core@0.14.19
+
+## 0.11.20
+
+### Patch Changes
+
+- Updated dependencies [fb0a083a]
+  - @farcaster/core@0.14.18
+
+## 0.11.19
+
+### Patch Changes
+
+- c723f655: feat: Add endpoints to control sync
+
+## 0.11.18
+
+### Patch Changes
+
+- Updated dependencies [eacf29c9]
+  - @farcaster/core@0.14.17
+
+## 0.11.17
+
+### Patch Changes
+
+- dab95118: Add rpc to expose LinkCompactStateMessage + explicit handling of type
+- Updated dependencies [dab95118]
+  - @farcaster/core@0.14.16
+
+## 0.11.16
+
+### Patch Changes
+
+- c424e111: feat: Add support for long casts
+- Updated dependencies [c424e111]
+  - @farcaster/core@0.14.15
+
+## 0.11.15
+
+### Patch Changes
+
+- Updated dependencies [de52fbce]
+  - @farcaster/core@0.14.14
+
+## 0.11.14
+
+### Patch Changes
+
+- Updated dependencies [911f8b23]
+  - @farcaster/core@0.14.13
+
+## 0.11.13
+
+### Patch Changes
+
+- 87c4f416: Include better error message when providing bad host address
+
+## 0.11.12
+
+### Patch Changes
+
+- c261fba6: added approxSize to getInfo()
+- Updated dependencies [c261fba6]
+  - @farcaster/core@0.14.12
+
+## 0.11.11
+
+### Patch Changes
+
+- 7b374890: feat: Add Link CompactStateMessage type for link compaction
+- Updated dependencies [ab9258af]
+- Updated dependencies [7b374890]
+  - @farcaster/core@0.14.11
+
+## 0.11.10
+
+### Patch Changes
+
+- 4c9fb617: feat: allow sharding event stream by fid
+- Updated dependencies [4c9fb617]
+  - @farcaster/core@0.14.10
+
+## 0.11.9
+
+### Patch Changes
+
+- 5ca5a4a5: feat: Add gossip MessageBundles
+- Updated dependencies [5ca5a4a5]
+  - @farcaster/core@0.14.9
+
+## 0.11.8
+
+### Patch Changes
+
+- Updated dependencies [e30297b9]
+  - @farcaster/core@0.14.8
+
 ## 0.11.7
 
 ### Patch Changes

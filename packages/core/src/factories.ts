@@ -107,7 +107,7 @@ const Ed25519PrivateKeyFactory = Factory.define<Uint8Array>(() => {
   return ed25519.utils.randomPrivateKey();
 });
 
-const Ed25519PPublicKeyFactory = Factory.define<Uint8Array>(() => {
+const Ed25519PublicKeyFactory = Factory.define<Uint8Array>(() => {
   const privateKey = Ed25519PrivateKeyFactory.build();
   return ed25519.getPublicKey(privateKey);
 });
@@ -288,11 +288,25 @@ const CastRemoveMessageFactory = Factory.define<protobufs.CastRemoveMessage, { s
   },
 );
 
+const LinkCompactStateBodyFactory = Factory.define<protobufs.LinkCompactStateBody>(() => {
+  return protobufs.LinkCompactStateBody.create({
+    targetFids: [FidFactory.build()],
+    type: "follow",
+  });
+});
+
 const LinkBodyFactory = Factory.define<protobufs.LinkBody>(() => {
   return protobufs.LinkBody.create({
     targetFid: FidFactory.build(),
     type: "follow",
   });
+});
+
+const LinkCompactStateAddDataFactory = Factory.define<protobufs.LinkCompactStateAddData>(() => {
+  return MessageDataFactory.build({
+    linkCompactStateBody: LinkCompactStateBodyFactory.build(),
+    type: protobufs.MessageType.LINK_COMPACT_STATE,
+  }) as protobufs.LinkCompactStateAddData;
 });
 
 const LinkAddDataFactory = Factory.define<protobufs.LinkAddData>(() => {
@@ -301,6 +315,21 @@ const LinkAddDataFactory = Factory.define<protobufs.LinkAddData>(() => {
     type: protobufs.MessageType.LINK_ADD,
   }) as protobufs.LinkAddData;
 });
+
+const LinkCompactStateMessageFactory = Factory.define<protobufs.LinkCompactStateMessage, { signer?: Ed25519Signer }>(
+  ({ onCreate, transientParams }) => {
+    onCreate((message) => {
+      return MessageFactory.create(message, {
+        transient: transientParams,
+      }) as Promise<protobufs.LinkCompactStateMessage>;
+    });
+
+    return MessageFactory.build(
+      { data: LinkCompactStateAddDataFactory.build(), signatureScheme: protobufs.SignatureScheme.ED25519 },
+      { transient: transientParams },
+    ) as protobufs.LinkCompactStateMessage;
+  },
+);
 
 const LinkAddMessageFactory = Factory.define<protobufs.LinkAddMessage, { signer?: Ed25519Signer }>(
   ({ onCreate, transientParams }) => {
@@ -719,7 +748,7 @@ const UserNameProofFactory = Factory.define<protobufs.UserNameProof>(() => {
 
 const SignerEventBodyFactory = Factory.define<protobufs.SignerEventBody>(() => {
   return SignerEventBody.create({
-    key: Ed25519PPublicKeyFactory.build(),
+    key: Ed25519PublicKeyFactory.build(),
     eventType: SignerEventType.ADD,
     keyType: 1,
     metadataType: 1,
@@ -773,8 +802,16 @@ const StorageRentEventBodyFactory = Factory.define<protobufs.StorageRentEventBod
 
 const StorageRentOnChainEventFactory = Factory.define<StorageRentOnChainEvent, { units?: number }>(
   ({ transientParams }) => {
+    const oneYearAgo = new Date();
+    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const randomDate = faker.date.between(oneYearAgo, yesterday);
+    const randomDateInSeconds = Math.floor(randomDate.getTime() / 1000);
+
     return OnChainEventFactory.build({
       type: OnChainEventType.EVENT_TYPE_STORAGE_RENT,
+      blockTimestamp: randomDateInSeconds,
       storageRentEventBody: transientParams.units
         ? StorageRentEventBodyFactory.build({ units: transientParams.units })
         : StorageRentEventBodyFactory.build(),
@@ -793,7 +830,7 @@ export const Factories = {
   EnsName: EnsNameFactory,
   TransactionHash: TransactionHashFactory,
   Ed25519PrivateKey: Ed25519PrivateKeyFactory,
-  Ed25519PPublicKey: Ed25519PPublicKeyFactory,
+  Ed25519PPublicKey: Ed25519PublicKeyFactory,
   Ed25519Signer: Ed25519SignerFactory,
   Ed25519Signature: Ed25519SignatureFactory,
   Eip712Signer: Eip712SignerFactory,
@@ -821,6 +858,7 @@ export const Factories = {
   LinkAddMessage: LinkAddMessageFactory,
   LinkRemoveData: LinkRemoveDataFactory,
   LinkRemoveMessage: LinkRemoveMessageFactory,
+  LinkCompactStateMessage: LinkCompactStateMessageFactory,
   ReactionBody: ReactionBodyFactory,
   ReactionAddData: ReactionAddDataFactory,
   ReactionAddMessage: ReactionAddMessageFactory,

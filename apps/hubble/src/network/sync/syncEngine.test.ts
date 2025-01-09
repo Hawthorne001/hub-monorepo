@@ -2,7 +2,6 @@ import {
   FarcasterNetwork,
   Factories,
   getFarcasterTime,
-  HubRpcClient,
   MessageType,
   Message,
   ReactionType,
@@ -16,11 +15,11 @@ import {
 } from "@farcaster/hub-nodejs";
 import { Err, Ok, ok } from "neverthrow";
 import { anything, instance, mock, when } from "ts-mockito";
-import SyncEngine from "./syncEngine.js";
+import SyncEngine, { CurrentSyncStatus, FailoverStreamSyncClient, SyncEngineWorkItem } from "./syncEngine.js";
 import { SyncId } from "./syncId.js";
 import { jestRocksDB } from "../../storage/db/jestUtils.js";
 import Engine from "../../storage/engine/index.js";
-import { sleepWhile } from "../../utils/crypto.js";
+import { SLEEPWHILE_TIMEOUT, sleepWhile } from "../../utils/crypto.js";
 import { NetworkFactories } from "../../network/utils/factories.js";
 import { HubInterface } from "../../hubble.js";
 import { MockHub } from "../../test/mocks.js";
@@ -30,7 +29,6 @@ import { IdRegisterOnChainEvent } from "@farcaster/core";
 import { createEd25519PeerId } from "@libp2p/peer-id-factory";
 
 const TEST_TIMEOUT_SHORT = 60 * 1000;
-const SLEEPWHILE_TIMEOUT = 10 * 1000;
 
 const testDb = jestRocksDB("engine.syncEngine.test");
 const testDb2 = jestRocksDB("engine2.syncEngine.test");
@@ -69,6 +67,7 @@ describe("SyncEngine", () => {
     hub = new MockHub(testDb, engine);
     syncEngine = new SyncEngine(hub, testDb);
     await syncEngine.start();
+    await syncEngine.trie.clear();
   }, TEST_TIMEOUT_SHORT);
 
   afterEach(async () => {
@@ -93,7 +92,7 @@ describe("SyncEngine", () => {
     );
 
     await sleepWhile(() => syncEngine.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
-    await syncEngine.trie.commitToDb();
+
     return results;
   };
 
@@ -207,6 +206,8 @@ describe("SyncEngine", () => {
     await engine.mergeOnChainEvent(custodyEvent);
     await engine.mergeOnChainEvent(signerEvent);
     await engine.mergeOnChainEvent(storageEvent);
+    await sleepWhile(() => syncEngine.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+
     const existingItems = await syncEngine.trie.items();
     expect(existingItems).toEqual(3);
 
@@ -239,6 +240,7 @@ describe("SyncEngine", () => {
 
     const currentTime = getFarcasterTime()._unsafeUnwrap();
 
+    await sleepWhile(() => syncEngine.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
     const existingItems = await syncEngine.trie.items();
     expect(existingItems).toEqual(3); // On chain events
 
@@ -280,6 +282,8 @@ describe("SyncEngine", () => {
     const hub2 = new MockHub(testDb2, engine2);
     const syncEngine2 = new SyncEngine(hub2, testDb2);
     await syncEngine2.start();
+    await syncEngine2.trie.clear();
+
     await engine2.mergeOnChainEvent(custodyEvent);
     await engine2.mergeOnChainEvent(signerEvent);
     await engine2.mergeOnChainEvent(storageEvent);
@@ -307,10 +311,10 @@ describe("SyncEngine", () => {
   });
 
   test("syncStatus.shouldSync is false when already syncing", async () => {
-    const mockRPCClient = mock<HubRpcClient>();
+    const mockRPCClient = mock<FailoverStreamSyncClient>();
     const rpcClient = instance(mockRPCClient);
     let called = false;
-    when(mockRPCClient.getSyncMetadataByPrefix(anything(), anything(), anything())).thenCall(async () => {
+    when(mockRPCClient.getSyncMetadataByPrefix(anything(), anything())).thenCall(async () => {
       const shouldSync = await syncEngine.syncStatus("test", {
         prefix: new Uint8Array(),
         numMessages: 10,
@@ -330,15 +334,7 @@ describe("SyncEngine", () => {
       });
       return Promise.resolve(ok(emptyMetadata));
     });
-    await syncEngine.performSync(
-      "test",
-      {
-        prefix: new Uint8Array(),
-        numMessages: 10,
-        excludedHashes: ["some-divergence"],
-      },
-      rpcClient,
-    );
+    await syncEngine.performSync("test", rpcClient);
     expect(called).toBeTruthy();
   });
 
@@ -379,14 +375,14 @@ describe("SyncEngine", () => {
     await engine.mergeOnChainEvent(custodyEvent);
     await engine.mergeOnChainEvent(signerEvent);
     await engine.mergeOnChainEvent(storageEvent);
-    const mockRPCClient = mock<HubRpcClient>();
+    const mockRPCClient = mock<FailoverStreamSyncClient>();
     const rpcClient = instance(mockRPCClient);
 
     const oldSnapshot = (await syncEngine.getSnapshot())._unsafeUnwrap();
     const result = await syncEngine.mergeMessages([castAdd], rpcClient);
     expect(result.successCount).toEqual(1);
 
-    // Should sync should return true becuase the excluded hashes don't match
+    // Should sync should return true because the excluded hashes don't match
     expect(oldSnapshot.excludedHashes).not.toEqual((await syncEngine.getSnapshot())._unsafeUnwrap().excludedHashes);
     expect((await syncEngine.syncStatus("test", oldSnapshot))._unsafeUnwrap().shouldSync).toBeTruthy();
 
@@ -424,13 +420,15 @@ describe("SyncEngine", () => {
     const messages = await addMessagesWithTimestamps([167, 169, 172]);
 
     expect(await syncEngine.trie.items()).toEqual(7); // 3 messages + 3 on chain events + 1 fname
+    const rootHash = await syncEngine.trie.rootHash();
+    await syncEngine.stop();
 
     const syncEngine2 = new SyncEngine(hub, testDb);
     await syncEngine2.start();
 
     // Make sure all messages exist
     expect(await syncEngine2.trie.items()).toEqual(7);
-    expect(await syncEngine2.trie.rootHash()).toEqual(await syncEngine.trie.rootHash());
+    expect(await syncEngine2.trie.rootHash()).toEqual(rootHash);
     expect(await syncEngine2.trie.exists(SyncId.fromMessage(messages[0] as Message))).toBeTruthy();
     expect(await syncEngine2.trie.exists(SyncId.fromMessage(messages[1] as Message))).toBeTruthy();
     expect(await syncEngine2.trie.exists(SyncId.fromMessage(messages[2] as Message))).toBeTruthy();
@@ -441,37 +439,6 @@ describe("SyncEngine", () => {
 
     await syncEngine2.stop();
   });
-
-  test(
-    "Rebuild trie from engine messages",
-    async () => {
-      await engine.mergeOnChainEvent(custodyEvent);
-      await engine.mergeOnChainEvent(signerEvent);
-      await engine.mergeOnChainEvent(storageEvent);
-      await engine.mergeUserNameProof(fnameProof);
-
-      const messages = await addMessagesWithTimestamps([167, 169, 172]);
-
-      expect(await syncEngine.trie.items()).toEqual(7); // 3 messages + 3 on chain events + 1 fname
-
-      const syncEngine2 = new SyncEngine(hub, testDb);
-      await syncEngine2.start(true); // Rebuild from engine messages
-
-      // Make sure all messages exist
-      expect(await syncEngine2.trie.items()).toEqual(7);
-      expect(await syncEngine2.trie.rootHash()).toEqual(await syncEngine.trie.rootHash());
-      expect(await syncEngine2.trie.exists(SyncId.fromMessage(messages[0] as Message))).toBeTruthy();
-      expect(await syncEngine2.trie.exists(SyncId.fromMessage(messages[1] as Message))).toBeTruthy();
-      expect(await syncEngine2.trie.exists(SyncId.fromMessage(messages[2] as Message))).toBeTruthy();
-      expect(await syncEngine2.trie.exists(SyncId.fromOnChainEvent(custodyEvent))).toBeTruthy();
-      expect(await syncEngine2.trie.exists(SyncId.fromOnChainEvent(signerEvent))).toBeTruthy();
-      expect(await syncEngine2.trie.exists(SyncId.fromOnChainEvent(storageEvent))).toBeTruthy();
-      expect(await syncEngine2.trie.exists(SyncId.fromFName(fnameProof))).toBeTruthy();
-
-      await syncEngine2.stop();
-    },
-    TEST_TIMEOUT_SHORT,
-  );
 
   test(
     "getSnapshot should use a prefix of 10-seconds resolution timestamp",
@@ -495,56 +462,6 @@ describe("SyncEngine", () => {
     TEST_TIMEOUT_SHORT,
   );
 
-  describe("getDivergencePrefix", () => {
-    const trieWithIds = async (timestamps: number[]) => {
-      const syncIds = await Promise.all(
-        timestamps.map(async (t) => {
-          return await NetworkFactories.SyncId.create(undefined, { transient: { date: new Date(t * 1000) } });
-        }),
-      );
-
-      await Promise.all(syncIds.map((id) => syncEngine.trie.insert(id)));
-      await syncEngine.trie.commitToDb();
-    };
-
-    test("returns the prefix with the most common excluded hashes", async () => {
-      await trieWithIds([1665182332, 1665182343, 1665182345]);
-
-      const trie = syncEngine.trie;
-
-      const prefixToTest = new Uint8Array(Buffer.from("1665182343"));
-      const oldSnapshot = await trie.getSnapshot(prefixToTest);
-      trie.insert(await NetworkFactories.SyncId.create(undefined, { transient: { date: new Date(1665182353000) } }));
-
-      // Since message above was added at 1665182353, the two tries diverged at 16651823 for our prefix
-      let divergencePrefix = syncEngine.getDivergencePrefix(
-        await trie.getSnapshot(prefixToTest),
-        oldSnapshot.excludedHashes,
-      );
-      expect(divergencePrefix).toEqual(new Uint8Array(Buffer.from("16651823")));
-
-      // divergence prefix should be the full prefix, if snapshots are the same
-      const currentSnapshot = await trie.getSnapshot(prefixToTest);
-      divergencePrefix = syncEngine.getDivergencePrefix(
-        await trie.getSnapshot(prefixToTest),
-        currentSnapshot.excludedHashes,
-      );
-      expect(divergencePrefix).toEqual(prefixToTest);
-
-      // divergence prefix should empty if excluded hashes are empty
-      divergencePrefix = syncEngine.getDivergencePrefix(await trie.getSnapshot(prefixToTest), []);
-      expect(divergencePrefix.length).toEqual(0);
-
-      // divergence prefix should be our prefix if provided hashes are longer
-      const with5 = Buffer.concat([prefixToTest, new Uint8Array(Buffer.from("5"))]);
-      divergencePrefix = syncEngine.getDivergencePrefix(await trie.getSnapshot(with5), [
-        ...currentSnapshot.excludedHashes,
-        "different",
-      ]);
-      expect(divergencePrefix).toEqual(prefixToTest);
-    });
-  });
-
   describe("events in sync trie", () => {
     let userNameProof: UserNameProof;
     beforeEach(async () => {
@@ -557,11 +474,15 @@ describe("SyncEngine", () => {
       test("updates the trie for on chain events", async () => {
         expect(await syncEngine.trie.exists(SyncId.fromOnChainEvent(custodyEvent))).toBeFalsy();
         await engine.mergeOnChainEvent(custodyEvent);
+        await sleepWhile(() => syncEngine.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+
         expect(await syncEngine.trie.exists(SyncId.fromOnChainEvent(custodyEvent))).toBeTruthy();
       });
       test("updates the trie for fname events", async () => {
         expect(await syncEngine.trie.exists(SyncId.fromFName(userNameProof))).toBeFalsy();
         await engine.mergeUserNameProof(userNameProof);
+        await sleepWhile(() => syncEngine.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+
         expect(await syncEngine.trie.exists(SyncId.fromFName(userNameProof))).toBeTruthy();
         expect((await syncEngine.getDbStats()).numFnames).toEqual(1);
       });
@@ -575,6 +496,8 @@ describe("SyncEngine", () => {
         });
         await engine.mergeUserNameProof(userNameProof);
         await engine.mergeUserNameProof(deletionProof);
+        await sleepWhile(() => syncEngine.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+
         expect(await syncEngine.trie.exists(SyncId.fromFName(userNameProof))).toBeFalsy();
         expect((await syncEngine.getDbStats()).numFnames).toEqual(0);
       });
@@ -589,6 +512,8 @@ describe("SyncEngine", () => {
         expect((await syncEngine.getDbStats()).numFnames).toEqual(0);
 
         await engine.mergeUserNameProof(userNameProof);
+        await sleepWhile(() => syncEngine.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+
         expect(await syncEngine.trie.exists(SyncId.fromFName(userNameProof))).toBeTruthy();
         expect((await syncEngine.getDbStats()).numFnames).toEqual(1);
 
@@ -604,8 +529,8 @@ describe("SyncEngine", () => {
         await engine.mergeOnChainEvent(custodyEvent);
         await engine.mergeUserNameProof(userNameProof);
 
-        await syncEngine.trie.deleteBySyncId(SyncId.fromOnChainEvent(custodyEvent));
-        await syncEngine.trie.deleteBySyncId(SyncId.fromFName(userNameProof));
+        await syncEngine.trie.delete(SyncId.fromOnChainEvent(custodyEvent));
+        await syncEngine.trie.delete(SyncId.fromFName(userNameProof));
 
         expect(await syncEngine.trie.exists(SyncId.fromFName(userNameProof))).toBeFalsy();
         expect(await syncEngine.trie.exists(SyncId.fromOnChainEvent(custodyEvent))).toBeFalsy();
@@ -632,12 +557,12 @@ describe("SyncEngine", () => {
       await engine.mergeUserNameProof(fnameProof);
       await engine.mergeMessage(castAdd);
 
-      // Manually remove cast add to have an emtpy trie
-      await syncEngine.trie.deleteBySyncId(SyncId.fromMessage(castAdd));
-      await syncEngine.trie.deleteBySyncId(SyncId.fromOnChainEvent(custodyEvent));
-      await syncEngine.trie.deleteBySyncId(SyncId.fromOnChainEvent(signerEvent));
-      await syncEngine.trie.deleteBySyncId(SyncId.fromOnChainEvent(storageEvent));
-      await syncEngine.trie.deleteBySyncId(SyncId.fromFName(fnameProof));
+      // Manually remove cast add to have an empty trie
+      await syncEngine.trie.delete(SyncId.fromMessage(castAdd));
+      await syncEngine.trie.delete(SyncId.fromOnChainEvent(custodyEvent));
+      await syncEngine.trie.delete(SyncId.fromOnChainEvent(signerEvent));
+      await syncEngine.trie.delete(SyncId.fromOnChainEvent(storageEvent));
+      await syncEngine.trie.delete(SyncId.fromFName(fnameProof));
       expect(await syncEngine.trie.exists(SyncId.fromMessage(castAdd))).toBeFalsy();
       expect(await syncEngine.trie.items()).toEqual(0);
 
@@ -654,32 +579,67 @@ describe("SyncEngine", () => {
 
   describe("addContactInfoForPeerId", () => {
     test("adds contact info for peer id", async () => {
-      const contactInfo = await NetworkFactories.GossipContactInfoContent.build();
+      const contactInfo = NetworkFactories.GossipContactInfoContent.build();
       const peerId = await createEd25519PeerId();
       expect(syncEngine.getContactInfoForPeerId(peerId.toString())).toBeUndefined();
 
-      expect(syncEngine.addContactInfoForPeerId(peerId, contactInfo)).toBeInstanceOf(Ok);
+      const updateThresholdMilliseconds = 0;
+      expect(syncEngine.addContactInfoForPeerId(peerId, contactInfo, updateThresholdMilliseconds)).toBeInstanceOf(Ok);
       expect(syncEngine.getContactInfoForPeerId(peerId.toString())?.contactInfo).toEqual(contactInfo);
       expect(syncEngine.getContactInfoForPeerId(peerId.toString())?.peerId).toEqual(peerId);
     });
 
     test("replaces contact info if newer", async () => {
       const now = Date.now();
-      const contactInfo = await NetworkFactories.GossipContactInfoContent.build({ timestamp: now });
-      const olderContactInfo = await NetworkFactories.GossipContactInfoContent.build({ timestamp: now - 10 });
-      const newerContactInfo = await NetworkFactories.GossipContactInfoContent.build({ timestamp: now + 10 });
+      const contactInfo = NetworkFactories.GossipContactInfoContent.build({ timestamp: now });
+      const olderContactInfo = NetworkFactories.GossipContactInfoContent.build({ timestamp: now - 10 });
+      const newerContactInfo = NetworkFactories.GossipContactInfoContent.build({ timestamp: now + 10 });
       const peerId = await createEd25519PeerId();
 
-      expect(syncEngine.addContactInfoForPeerId(peerId, contactInfo)).toBeInstanceOf(Ok);
+      // NB: We set update value to 0, but there may non-determinism if test runs too quickly. If the tests start getting
+      // too flaky, we can sleep for a millisecond between function calls to make sure the time elapsed is greater than 0.
+      const updateThresholdMilliseconds = 0;
+      expect(syncEngine.addContactInfoForPeerId(peerId, contactInfo, updateThresholdMilliseconds)).toBeInstanceOf(Ok);
       expect(syncEngine.getContactInfoForPeerId(peerId.toString())?.contactInfo).toEqual(contactInfo);
 
       // Adding an older contact info should not replace the existing one
-      expect(syncEngine.addContactInfoForPeerId(peerId, olderContactInfo)).toBeInstanceOf(Err);
+      expect(syncEngine.addContactInfoForPeerId(peerId, olderContactInfo, updateThresholdMilliseconds)).toBeInstanceOf(
+        Err,
+      );
       expect(syncEngine.getContactInfoForPeerId(peerId.toString())?.contactInfo).toEqual(contactInfo);
 
       // Adding a newer contact info should replace the existing one
-      expect(syncEngine.addContactInfoForPeerId(peerId, newerContactInfo)).toBeInstanceOf(Err);
+      expect(syncEngine.addContactInfoForPeerId(peerId, newerContactInfo, updateThresholdMilliseconds)).toBeInstanceOf(
+        Ok,
+      );
       expect(syncEngine.getContactInfoForPeerId(peerId.toString())?.contactInfo).toEqual(newerContactInfo);
     });
+  });
+});
+
+describe("PriorityQueue", () => {
+  test("PriorityQueue sorts by priority", () => {
+    const c = new CurrentSyncStatus("peerId1");
+    expect(c.workQueue.size()).toEqual(0);
+
+    // Add a work item
+    c.workQueue.enqueue({ score: 5 } as SyncEngineWorkItem);
+
+    expect(c.workQueue.size()).toEqual(1);
+    expect(c.workQueue.pop()).toEqual({ score: 5 });
+
+    expect(c.workQueue.pop()).toBeNull();
+
+    // Add multiple work items
+    c.workQueue.enqueue({ score: 5 } as SyncEngineWorkItem);
+    c.workQueue.enqueue({ score: 3 } as SyncEngineWorkItem);
+    c.workQueue.enqueue({ score: 7 } as SyncEngineWorkItem);
+
+    expect(c.workQueue.size()).toEqual(3);
+
+    expect(c.workQueue.pop()).toEqual({ score: 7 });
+    expect(c.workQueue.pop()).toEqual({ score: 5 });
+    expect(c.workQueue.pop()).toEqual({ score: 3 });
+    expect(c.workQueue.pop()).toBeNull();
   });
 });

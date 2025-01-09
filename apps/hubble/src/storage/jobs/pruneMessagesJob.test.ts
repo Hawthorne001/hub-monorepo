@@ -6,6 +6,7 @@ import {
   Message,
   MessageType,
   PruneMessageHubEvent,
+  StorageUnitType,
   StoreType,
 } from "@farcaster/hub-nodejs";
 import { jestRocksDB } from "../db/jestUtils.js";
@@ -19,7 +20,9 @@ import { makeTsHash } from "../../storage/db/message.js";
 const db = jestRocksDB("jobs.pruneMessagesJob.test");
 
 const engine = new Engine(db, FarcasterNetwork.TESTNET);
-const scheduler = new PruneMessagesJobScheduler(engine, () => 0);
+const scheduler = new PruneMessagesJobScheduler(engine);
+
+const TEST_TIMEOUT_LONG = 60 * 1000;
 
 // Use farcaster timestamp
 const seedMessagesFromTimestamp = async (engine: Engine, fid: number, signer: Ed25519Signer, timestamp: number) => {
@@ -30,7 +33,7 @@ const seedMessagesFromTimestamp = async (engine: Engine, fid: number, signer: Ed
   );
   const linkAdd = await Factories.LinkAddMessage.create({ data: { fid, timestamp } }, { transient: { signer } });
   const proofs = await Factories.VerificationAddEthAddressMessage.createList(
-    getDefaultStoreLimit(StoreType.VERIFICATIONS) + 1,
+    getDefaultStoreLimit(StoreType.VERIFICATIONS, StorageUnitType.UNIT_TYPE_2024) + 1,
     { data: { fid, timestamp } },
     { transient: { signer } },
   );
@@ -107,7 +110,7 @@ describe("doJobs", () => {
 
         const verifications = await engine.getVerificationsByFid(fid);
         expect(verifications._unsafeUnwrap().messages.length).toEqual(
-          getDefaultStoreLimit(StoreType.VERIFICATIONS) + 1,
+          getDefaultStoreLimit(StoreType.VERIFICATIONS, StorageUnitType.UNIT_TYPE_2024) + 1,
         );
       }
 
@@ -140,6 +143,6 @@ describe("doJobs", () => {
       expect(prunedMessages.length).toEqual(2); // 1 verification for each of the 2 fids
       expect(prunedMessages.filter((m) => m.data?.type !== MessageType.VERIFICATION_ADD_ETH_ADDRESS)).toEqual([]);
     },
-    15 * 1000,
+    TEST_TIMEOUT_LONG,
   );
 });

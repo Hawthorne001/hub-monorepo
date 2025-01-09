@@ -4,7 +4,7 @@ A Farcaster Message represents an action taken by a user.
 
 Messages are atomic updates that add or remove content from the network. For example, a user can make a new cast by generating a `CastAdd` message and remove it with a `CastRemove` message. See the [protocol spec](https://github.com/farcasterxyz/protocol#3-delta-graph) for more information on how messages work.
 
-Messages are [protobufs](https://protobuf.dev/) which are converted by @farcaster/hub-nodejs into the Typescript types documented below. Each message is signed by a key pair that is provably controlled by the user. Some messages must be signed by the Ethereum address that controls the user's fid on-chain while other messages must be signed by an EdDSA key pair known as a Signer, which is authorized to act on behalf of the Ethereum address. The protocol specification defines the message types as:
+Messages are [protobufs](https://protobuf.dev/) which are converted by @farcaster/hub-nodejs into the Typescript types documented below. Each message is signed by a key pair that is provably controlled by the user. Some messages must be signed by the Ethereum address that controls the user's fid onchain while other messages must be signed by an EdDSA key pair known as a Signer, which is authorized to act on behalf of the Ethereum address. The protocol specification defines the message types as:
 
 | Message                   | Action                                                              |
 | ------------------------- | ------------------------------------------------------------------- |
@@ -30,7 +30,7 @@ A generic container which holds the contents of the message(`MessageData`) and m
 | `signature`       | `Uint8Array`                          | Signature of the hash digest                      |
 | `signatureScheme` | [`SignatureScheme`](#signaturescheme) | Signature scheme that produced the signature      |
 | `signer`          | `Uint8Array`                          | Public key or address that produced the signature |
-| `data_bytes`      | `Uint8Array`                          | Alternative to using the `data` field. Contains the serialized `MessageData` bytes, on which you can calculate the `hash` and `signature`. Use this field instead of `data` if you are using another programing language or protobuf encoding scheme. Optional. |
+| `data_bytes`      | `Uint8Array`                          | Alternative to using the `data` field. Contains the serialized `MessageData` bytes, on which you can calculate the `hash` and `signature`. Use this field instead of `data` if you are using another programming language or protobuf encoding scheme. Optional. |
 
 ## MessageData\<Body,Type>
 
@@ -78,7 +78,7 @@ Due to a quirk of how gRPC compiles types to TypeScript, MessageData has many op
 | Name                 | Type                | Description                           |
 | :------------------- | :------------------ | ------------------------------------- |
 | `embeds?`            | `string[]`          | URLs to be embedded in the cast       |
-| `mentions?`          | `number[]`          | Fids mentioned in the cast            |
+| `mentions?`          | `number[]`          | FIDs mentioned in the cast            |
 | `mentionsPositions?` | `number[]`          | Positions of the mentions in the text |
 | `parentCastId?`      | [`CastId`](#castid) | Parent cast of the cast               |
 | `text`               | `string`            | Text of the cast                      |
@@ -190,7 +190,7 @@ Unique identifier for a Cast that includes its author.
 
 | Name   | Type     | Description                          |
 | :----- | :------- | ------------------------------------ |
-| `fid`  | `number` | Fid of the user who created the cast |
+| `fid`  | `number` | FID of the user who created the cast |
 | `hash` | `string` | Hash of the cast                     |
 
 ### VerificationEthAddressClaim

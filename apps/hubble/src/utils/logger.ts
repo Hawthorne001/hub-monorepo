@@ -134,6 +134,46 @@ class BufferedLogger {
   }
 }
 
+export type TagFields = {
+  fid?: number;
+  timestamp?: number;
+  peerId?: string;
+  messageType?: MessageType;
+  message?: Message;
+  // biome-ignore lint/suspicious/noExplicitAny: justified use case
+  [key: string]: any;
+};
+
+// Always go through this class to construct log tags so that tag names are standardized.
+export class Tags {
+  private fields: TagFields;
+
+  constructor(fields: TagFields) {
+    this.fields = fields;
+  }
+
+  toString() {
+    const extraFields = Object.fromEntries(
+      Object.entries(this.fields).filter(([key, value]) => {
+        return !["fid", "timestamp", "peerId", "messageType", "message"].includes(key);
+      }),
+    );
+    JSON.stringify({
+      fid: this.fields.fid,
+      timestamp: this.fields.timestamp,
+      peerId: this.fields.peerId,
+      messageType: this.fields.messageType,
+      messageFields: {
+        timestamp: fromFarcasterTime(this.fields.message?.data?.timestamp || 0)._unsafeUnwrap(),
+        hash: this.fields.message ? bytesToHexString(this.fields.message.hash)._unsafeUnwrap() : undefined,
+        fid: this.fields.message?.data?.fid,
+        type: this.fields.message?.data?.type,
+      },
+      ...extraFields,
+    });
+  }
+}
+
 export const logger = new BufferedLogger().createProxy();
 export type Logger = pino.Logger;
 
@@ -167,3 +207,35 @@ export const usernameProofToLog = (usernameProof: UserNameProof) => {
     owner: bytesToHexString(usernameProof.owner)._unsafeUnwrap(),
   };
 };
+
+export class SubmitMessageSuccessLogCache {
+  counts: Map<string, number> = new Map();
+  logger: Logger;
+  lastLogTimestampMs: number;
+
+  constructor(logger: Logger) {
+    this.logger = logger;
+    this.lastLogTimestampMs = 0;
+  }
+
+  log(source: string) {
+    const count = this.counts.get(source) || 0;
+    this.counts.set(source, count + 1);
+
+    const now = Date.now();
+    if (now - this.lastLogTimestampMs > 1000) {
+      this.lastLogTimestampMs = now;
+
+      const total = Array.from(this.counts.values()).reduce((acc, val) => acc + val, 0);
+
+      // Collect the counts as an object for logging
+      const counts: { [source: string]: number } = {};
+      this.counts.forEach((value, key) => {
+        counts[key] = value;
+      });
+
+      this.logger.info({ ...counts, total }, "Successfully submitted messages");
+      this.counts.clear();
+    }
+  }
+}
