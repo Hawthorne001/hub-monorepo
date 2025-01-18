@@ -3,9 +3,11 @@ import {
   CallOptions,
   ChannelCredentials,
   Client,
+  ClientDuplexStream,
   ClientOptions,
   ClientReadableStream,
   ClientUnaryCall,
+  handleBidiStreamingCall,
   handleServerStreamingCall,
   handleUnaryCall,
   makeGenericClientConstructor,
@@ -24,6 +26,7 @@ import {
   FidRequest,
   FidsRequest,
   FidsResponse,
+  FidTimestampRequest,
   HubInfoRequest,
   HubInfoResponse,
   IdRegistryEventByAddressRequest,
@@ -38,6 +41,12 @@ import {
   ReactionsByTargetRequest,
   SignerRequest,
   StorageLimitsResponse,
+  StreamFetchRequest,
+  StreamFetchResponse,
+  StreamSyncRequest,
+  StreamSyncResponse,
+  SubmitBulkMessagesRequest,
+  SubmitBulkMessagesResponse,
   SubscribeRequest,
   SyncIds,
   SyncStatusRequest,
@@ -359,8 +368,8 @@ export const HubServiceService = {
     path: "/HubService/GetAllCastMessagesByFid",
     requestStream: false,
     responseStream: false,
-    requestSerialize: (value: FidRequest) => Buffer.from(FidRequest.encode(value).finish()),
-    requestDeserialize: (value: Buffer) => FidRequest.decode(value),
+    requestSerialize: (value: FidTimestampRequest) => Buffer.from(FidTimestampRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => FidTimestampRequest.decode(value),
     responseSerialize: (value: MessagesResponse) => Buffer.from(MessagesResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer) => MessagesResponse.decode(value),
   },
@@ -369,8 +378,8 @@ export const HubServiceService = {
     path: "/HubService/GetAllReactionMessagesByFid",
     requestStream: false,
     responseStream: false,
-    requestSerialize: (value: FidRequest) => Buffer.from(FidRequest.encode(value).finish()),
-    requestDeserialize: (value: Buffer) => FidRequest.decode(value),
+    requestSerialize: (value: FidTimestampRequest) => Buffer.from(FidTimestampRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => FidTimestampRequest.decode(value),
     responseSerialize: (value: MessagesResponse) => Buffer.from(MessagesResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer) => MessagesResponse.decode(value),
   },
@@ -379,8 +388,8 @@ export const HubServiceService = {
     path: "/HubService/GetAllVerificationMessagesByFid",
     requestStream: false,
     responseStream: false,
-    requestSerialize: (value: FidRequest) => Buffer.from(FidRequest.encode(value).finish()),
-    requestDeserialize: (value: Buffer) => FidRequest.decode(value),
+    requestSerialize: (value: FidTimestampRequest) => Buffer.from(FidTimestampRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => FidTimestampRequest.decode(value),
     responseSerialize: (value: MessagesResponse) => Buffer.from(MessagesResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer) => MessagesResponse.decode(value),
   },
@@ -389,8 +398,8 @@ export const HubServiceService = {
     path: "/HubService/GetAllUserDataMessagesByFid",
     requestStream: false,
     responseStream: false,
-    requestSerialize: (value: FidRequest) => Buffer.from(FidRequest.encode(value).finish()),
-    requestDeserialize: (value: Buffer) => FidRequest.decode(value),
+    requestSerialize: (value: FidTimestampRequest) => Buffer.from(FidTimestampRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => FidTimestampRequest.decode(value),
     responseSerialize: (value: MessagesResponse) => Buffer.from(MessagesResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer) => MessagesResponse.decode(value),
   },
@@ -399,10 +408,32 @@ export const HubServiceService = {
     path: "/HubService/GetAllLinkMessagesByFid",
     requestStream: false,
     responseStream: false,
+    requestSerialize: (value: FidTimestampRequest) => Buffer.from(FidTimestampRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => FidTimestampRequest.decode(value),
+    responseSerialize: (value: MessagesResponse) => Buffer.from(MessagesResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer) => MessagesResponse.decode(value),
+  },
+  /** @http-api: none */
+  getLinkCompactStateMessageByFid: {
+    path: "/HubService/GetLinkCompactStateMessageByFid",
+    requestStream: false,
+    responseStream: false,
     requestSerialize: (value: FidRequest) => Buffer.from(FidRequest.encode(value).finish()),
     requestDeserialize: (value: Buffer) => FidRequest.decode(value),
     responseSerialize: (value: MessagesResponse) => Buffer.from(MessagesResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer) => MessagesResponse.decode(value),
+  },
+  /** @http-api: none */
+  submitBulkMessages: {
+    path: "/HubService/SubmitBulkMessages",
+    requestStream: false,
+    responseStream: false,
+    requestSerialize: (value: SubmitBulkMessagesRequest) =>
+      Buffer.from(SubmitBulkMessagesRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => SubmitBulkMessagesRequest.decode(value),
+    responseSerialize: (value: SubmitBulkMessagesResponse) =>
+      Buffer.from(SubmitBulkMessagesResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer) => SubmitBulkMessagesResponse.decode(value),
   },
   /** Sync Methods */
   getInfo: {
@@ -422,6 +453,29 @@ export const HubServiceService = {
     requestDeserialize: (value: Buffer) => Empty.decode(value),
     responseSerialize: (value: ContactInfoResponse) => Buffer.from(ContactInfoResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer) => ContactInfoResponse.decode(value),
+  },
+  /** @http-api: none */
+  stopSync: {
+    path: "/HubService/StopSync",
+    requestStream: false,
+    responseStream: false,
+    requestSerialize: (value: Empty) => Buffer.from(Empty.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => Empty.decode(value),
+    responseSerialize: (value: SyncStatusResponse) => Buffer.from(SyncStatusResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer) => SyncStatusResponse.decode(value),
+  },
+  /**
+   * This is experimental, do not rely on this endpoint existing in the future
+   * @http-api: none
+   */
+  forceSync: {
+    path: "/HubService/ForceSync",
+    requestStream: false,
+    responseStream: false,
+    requestSerialize: (value: SyncStatusRequest) => Buffer.from(SyncStatusRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => SyncStatusRequest.decode(value),
+    responseSerialize: (value: SyncStatusResponse) => Buffer.from(SyncStatusResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer) => SyncStatusResponse.decode(value),
   },
   /** @http-api: none */
   getSyncStatus: {
@@ -474,6 +528,26 @@ export const HubServiceService = {
     responseSerialize: (value: TrieNodeSnapshotResponse) =>
       Buffer.from(TrieNodeSnapshotResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer) => TrieNodeSnapshotResponse.decode(value),
+  },
+  /** @http-api: none */
+  streamSync: {
+    path: "/HubService/StreamSync",
+    requestStream: true,
+    responseStream: true,
+    requestSerialize: (value: StreamSyncRequest) => Buffer.from(StreamSyncRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => StreamSyncRequest.decode(value),
+    responseSerialize: (value: StreamSyncResponse) => Buffer.from(StreamSyncResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer) => StreamSyncResponse.decode(value),
+  },
+  /** @http-api: none */
+  streamFetch: {
+    path: "/HubService/StreamFetch",
+    requestStream: true,
+    responseStream: true,
+    requestSerialize: (value: StreamFetchRequest) => Buffer.from(StreamFetchRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => StreamFetchRequest.decode(value),
+    responseSerialize: (value: StreamFetchResponse) => Buffer.from(StreamFetchResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer) => StreamFetchResponse.decode(value),
   },
 } as const;
 
@@ -553,18 +627,29 @@ export interface HubServiceServer extends UntypedServiceImplementation {
    * regular endpoints can be used to get all the messages
    * @http-api: none
    */
-  getAllCastMessagesByFid: handleUnaryCall<FidRequest, MessagesResponse>;
+  getAllCastMessagesByFid: handleUnaryCall<FidTimestampRequest, MessagesResponse>;
   /** @http-api: none */
-  getAllReactionMessagesByFid: handleUnaryCall<FidRequest, MessagesResponse>;
+  getAllReactionMessagesByFid: handleUnaryCall<FidTimestampRequest, MessagesResponse>;
   /** @http-api: none */
-  getAllVerificationMessagesByFid: handleUnaryCall<FidRequest, MessagesResponse>;
+  getAllVerificationMessagesByFid: handleUnaryCall<FidTimestampRequest, MessagesResponse>;
   /** @http-api: none */
-  getAllUserDataMessagesByFid: handleUnaryCall<FidRequest, MessagesResponse>;
+  getAllUserDataMessagesByFid: handleUnaryCall<FidTimestampRequest, MessagesResponse>;
   /** @http-api: none */
-  getAllLinkMessagesByFid: handleUnaryCall<FidRequest, MessagesResponse>;
+  getAllLinkMessagesByFid: handleUnaryCall<FidTimestampRequest, MessagesResponse>;
+  /** @http-api: none */
+  getLinkCompactStateMessageByFid: handleUnaryCall<FidRequest, MessagesResponse>;
+  /** @http-api: none */
+  submitBulkMessages: handleUnaryCall<SubmitBulkMessagesRequest, SubmitBulkMessagesResponse>;
   /** Sync Methods */
   getInfo: handleUnaryCall<HubInfoRequest, HubInfoResponse>;
   getCurrentPeers: handleUnaryCall<Empty, ContactInfoResponse>;
+  /** @http-api: none */
+  stopSync: handleUnaryCall<Empty, SyncStatusResponse>;
+  /**
+   * This is experimental, do not rely on this endpoint existing in the future
+   * @http-api: none
+   */
+  forceSync: handleUnaryCall<SyncStatusRequest, SyncStatusResponse>;
   /** @http-api: none */
   getSyncStatus: handleUnaryCall<SyncStatusRequest, SyncStatusResponse>;
   /** @http-api: none */
@@ -575,6 +660,10 @@ export interface HubServiceServer extends UntypedServiceImplementation {
   getSyncMetadataByPrefix: handleUnaryCall<TrieNodePrefix, TrieNodeMetadataResponse>;
   /** @http-api: none */
   getSyncSnapshotByPrefix: handleUnaryCall<TrieNodePrefix, TrieNodeSnapshotResponse>;
+  /** @http-api: none */
+  streamSync: handleBidiStreamingCall<StreamSyncRequest, StreamSyncResponse>;
+  /** @http-api: none */
+  streamFetch: handleBidiStreamingCall<StreamFetchRequest, StreamFetchResponse>;
 }
 
 export interface HubServiceClient extends Client {
@@ -1025,83 +1114,115 @@ export interface HubServiceClient extends Client {
    * @http-api: none
    */
   getAllCastMessagesByFid(
-    request: FidRequest,
+    request: FidTimestampRequest,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
   ): ClientUnaryCall;
   getAllCastMessagesByFid(
-    request: FidRequest,
+    request: FidTimestampRequest,
     metadata: Metadata,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
   ): ClientUnaryCall;
   getAllCastMessagesByFid(
-    request: FidRequest,
+    request: FidTimestampRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
   ): ClientUnaryCall;
   /** @http-api: none */
   getAllReactionMessagesByFid(
-    request: FidRequest,
+    request: FidTimestampRequest,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
   ): ClientUnaryCall;
   getAllReactionMessagesByFid(
-    request: FidRequest,
+    request: FidTimestampRequest,
     metadata: Metadata,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
   ): ClientUnaryCall;
   getAllReactionMessagesByFid(
-    request: FidRequest,
+    request: FidTimestampRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
   ): ClientUnaryCall;
   /** @http-api: none */
   getAllVerificationMessagesByFid(
-    request: FidRequest,
+    request: FidTimestampRequest,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
   ): ClientUnaryCall;
   getAllVerificationMessagesByFid(
-    request: FidRequest,
+    request: FidTimestampRequest,
     metadata: Metadata,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
   ): ClientUnaryCall;
   getAllVerificationMessagesByFid(
-    request: FidRequest,
+    request: FidTimestampRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
   ): ClientUnaryCall;
   /** @http-api: none */
   getAllUserDataMessagesByFid(
-    request: FidRequest,
+    request: FidTimestampRequest,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
   ): ClientUnaryCall;
   getAllUserDataMessagesByFid(
-    request: FidRequest,
+    request: FidTimestampRequest,
     metadata: Metadata,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
   ): ClientUnaryCall;
   getAllUserDataMessagesByFid(
-    request: FidRequest,
+    request: FidTimestampRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
   ): ClientUnaryCall;
   /** @http-api: none */
   getAllLinkMessagesByFid(
-    request: FidRequest,
+    request: FidTimestampRequest,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
   ): ClientUnaryCall;
   getAllLinkMessagesByFid(
-    request: FidRequest,
+    request: FidTimestampRequest,
     metadata: Metadata,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
   ): ClientUnaryCall;
   getAllLinkMessagesByFid(
+    request: FidTimestampRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: MessagesResponse) => void,
+  ): ClientUnaryCall;
+  /** @http-api: none */
+  getLinkCompactStateMessageByFid(
+    request: FidRequest,
+    callback: (error: ServiceError | null, response: MessagesResponse) => void,
+  ): ClientUnaryCall;
+  getLinkCompactStateMessageByFid(
+    request: FidRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: MessagesResponse) => void,
+  ): ClientUnaryCall;
+  getLinkCompactStateMessageByFid(
     request: FidRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: MessagesResponse) => void,
+  ): ClientUnaryCall;
+  /** @http-api: none */
+  submitBulkMessages(
+    request: SubmitBulkMessagesRequest,
+    callback: (error: ServiceError | null, response: SubmitBulkMessagesResponse) => void,
+  ): ClientUnaryCall;
+  submitBulkMessages(
+    request: SubmitBulkMessagesRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: SubmitBulkMessagesResponse) => void,
+  ): ClientUnaryCall;
+  submitBulkMessages(
+    request: SubmitBulkMessagesRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: SubmitBulkMessagesResponse) => void,
   ): ClientUnaryCall;
   /** Sync Methods */
   getInfo(
@@ -1135,6 +1256,41 @@ export interface HubServiceClient extends Client {
     callback: (error: ServiceError | null, response: ContactInfoResponse) => void,
   ): ClientUnaryCall;
   /** @http-api: none */
+  stopSync(
+    request: Empty,
+    callback: (error: ServiceError | null, response: SyncStatusResponse) => void,
+  ): ClientUnaryCall;
+  stopSync(
+    request: Empty,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: SyncStatusResponse) => void,
+  ): ClientUnaryCall;
+  stopSync(
+    request: Empty,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: SyncStatusResponse) => void,
+  ): ClientUnaryCall;
+  /**
+   * This is experimental, do not rely on this endpoint existing in the future
+   * @http-api: none
+   */
+  forceSync(
+    request: SyncStatusRequest,
+    callback: (error: ServiceError | null, response: SyncStatusResponse) => void,
+  ): ClientUnaryCall;
+  forceSync(
+    request: SyncStatusRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: SyncStatusResponse) => void,
+  ): ClientUnaryCall;
+  forceSync(
+    request: SyncStatusRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: SyncStatusResponse) => void,
+  ): ClientUnaryCall;
+  /** @http-api: none */
   getSyncStatus(
     request: SyncStatusRequest,
     callback: (error: ServiceError | null, response: SyncStatusResponse) => void,
@@ -1214,6 +1370,20 @@ export interface HubServiceClient extends Client {
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: TrieNodeSnapshotResponse) => void,
   ): ClientUnaryCall;
+  /** @http-api: none */
+  streamSync(): ClientDuplexStream<StreamSyncRequest, StreamSyncResponse>;
+  streamSync(options: Partial<CallOptions>): ClientDuplexStream<StreamSyncRequest, StreamSyncResponse>;
+  streamSync(
+    metadata: Metadata,
+    options?: Partial<CallOptions>,
+  ): ClientDuplexStream<StreamSyncRequest, StreamSyncResponse>;
+  /** @http-api: none */
+  streamFetch(): ClientDuplexStream<StreamFetchRequest, StreamFetchResponse>;
+  streamFetch(options: Partial<CallOptions>): ClientDuplexStream<StreamFetchRequest, StreamFetchResponse>;
+  streamFetch(
+    metadata: Metadata,
+    options?: Partial<CallOptions>,
+  ): ClientDuplexStream<StreamFetchRequest, StreamFetchResponse>;
 }
 
 export const HubServiceClient = makeGenericClientConstructor(HubServiceService, "HubService") as unknown as {

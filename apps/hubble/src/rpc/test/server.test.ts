@@ -14,13 +14,18 @@ import {
   StorageLimitsResponse,
   StoreType,
   getDefaultStoreLimit,
+  HubError,
+  StorageUnitType,
+  LEGACY_STORAGE_UNIT_CUTOFF_TIMESTAMP,
 } from "@farcaster/hub-nodejs";
 import Engine from "../../storage/engine/index.js";
 import { MockHub } from "../../test/mocks.js";
-import Server from "../server.js";
+import Server, { checkPort } from "../server.js";
 import SyncEngine from "../../network/sync/syncEngine.js";
-import { Ok } from "neverthrow";
+import { Err, Ok } from "neverthrow";
 import { sleep } from "../../utils/crypto.js";
+import * as http from "http";
+import { AddressInfo, createServer } from "net";
 
 const db = jestRocksDB("protobufs.rpc.server.test");
 const network = FarcasterNetwork.TESTNET;
@@ -33,6 +38,7 @@ let client: HubRpcClient;
 
 beforeAll(async () => {
   syncEngine = new SyncEngine(hub, db);
+  await syncEngine.start();
   server = new Server(hub, engine, syncEngine);
   const port = await server.start();
   client = getInsecureHubRpcClient(`127.0.0.1:${port}`);
@@ -59,7 +65,10 @@ beforeEach(async () => {
   const custodySignerKey = (await custodySigner.getSignerKey())._unsafeUnwrap();
   custodyEvent = Factories.IdRegistryOnChainEvent.build({ fid }, { transient: { to: custodySignerKey } });
   signerEvent = Factories.SignerOnChainEvent.build({ fid }, { transient: { signer: signerKey } });
-  storageEvent = Factories.StorageRentOnChainEvent.build({ fid }, { transient: { units: 1 } });
+  storageEvent = Factories.StorageRentOnChainEvent.build(
+    { fid, blockTimestamp: LEGACY_STORAGE_UNIT_CUTOFF_TIMESTAMP - 1 },
+    { transient: { units: 1 } },
+  );
   await engine.mergeOnChainEvent(custodyEvent);
   await engine.mergeOnChainEvent(signerEvent);
   await engine.mergeOnChainEvent(storageEvent);
@@ -137,7 +146,7 @@ describe("server rpc tests", () => {
       const storageLimits = limitsResponse.limits;
       expect(storageLimits).toContainEqual(
         StorageLimit.create({
-          limit: getDefaultStoreLimit(StoreType.CASTS),
+          limit: getDefaultStoreLimit(StoreType.CASTS, StorageUnitType.UNIT_TYPE_LEGACY),
           storeType: StoreType.CASTS,
           name: "CASTS",
           used: 2,
@@ -147,7 +156,7 @@ describe("server rpc tests", () => {
       );
       expect(storageLimits).toContainEqual(
         StorageLimit.create({
-          limit: getDefaultStoreLimit(StoreType.REACTIONS),
+          limit: getDefaultStoreLimit(StoreType.REACTIONS, StorageUnitType.UNIT_TYPE_LEGACY),
           storeType: StoreType.REACTIONS,
           name: "REACTIONS",
           used: 0,
@@ -157,7 +166,7 @@ describe("server rpc tests", () => {
       );
       expect(storageLimits).toContainEqual(
         StorageLimit.create({
-          limit: getDefaultStoreLimit(StoreType.LINKS),
+          limit: getDefaultStoreLimit(StoreType.LINKS, StorageUnitType.UNIT_TYPE_LEGACY),
           storeType: StoreType.LINKS,
           name: "LINKS",
           used: 0,
@@ -167,7 +176,7 @@ describe("server rpc tests", () => {
       );
       expect(storageLimits).toContainEqual(
         StorageLimit.create({
-          limit: getDefaultStoreLimit(StoreType.USER_DATA),
+          limit: getDefaultStoreLimit(StoreType.USER_DATA, StorageUnitType.UNIT_TYPE_LEGACY),
           storeType: StoreType.USER_DATA,
           name: "USER_DATA",
           used: 0,
@@ -177,7 +186,7 @@ describe("server rpc tests", () => {
       );
       expect(storageLimits).toContainEqual(
         StorageLimit.create({
-          limit: getDefaultStoreLimit(StoreType.VERIFICATIONS),
+          limit: getDefaultStoreLimit(StoreType.VERIFICATIONS, StorageUnitType.UNIT_TYPE_LEGACY),
           storeType: StoreType.VERIFICATIONS,
           name: "VERIFICATIONS",
           used: 1,
@@ -187,7 +196,7 @@ describe("server rpc tests", () => {
       );
       expect(storageLimits).toContainEqual(
         StorageLimit.create({
-          limit: getDefaultStoreLimit(StoreType.USERNAME_PROOFS),
+          limit: getDefaultStoreLimit(StoreType.USERNAME_PROOFS, StorageUnitType.UNIT_TYPE_LEGACY),
           storeType: StoreType.USERNAME_PROOFS,
           name: "USERNAME_PROOFS",
           used: 0,
@@ -199,6 +208,7 @@ describe("server rpc tests", () => {
       // add 2 more units
       const rentEvent2 = Factories.StorageRentOnChainEvent.build({
         fid,
+        blockTimestamp: LEGACY_STORAGE_UNIT_CUTOFF_TIMESTAMP + 2,
         storageRentEventBody: Factories.StorageRentEventBody.build({ units: 2 }),
       });
       await engine.mergeOnChainEvent(rentEvent2);
@@ -208,8 +218,50 @@ describe("server rpc tests", () => {
       const newLimits = limitsResponse2.limits;
       expect(newLimits.length).toEqual(6);
       for (const limit of newLimits) {
-        expect(limit.limit).toEqual(getDefaultStoreLimit(limit.storeType) * 3);
+        // 1 unit of legacy storage from the first event, 2 units of 2024 storage from the second event
+        const expectedLimit =
+          getDefaultStoreLimit(limit.storeType, StorageUnitType.UNIT_TYPE_LEGACY) +
+          getDefaultStoreLimit(limit.storeType, StorageUnitType.UNIT_TYPE_2024) * 2;
+        expect(limit.limit).toEqual(expectedLimit);
       }
     });
+  });
+});
+
+describe("checkPort", () => {
+  let server: http.Server;
+  const testPort = 3111; // Example port
+
+  beforeAll((done) => {
+    server = http.createServer((req, res) => {
+      res.writeHead(200);
+      res.end("Test Server");
+    });
+
+    server.listen(testPort, done);
+  });
+
+  afterAll((done) => {
+    server.close(done);
+  });
+
+  it("should verify the port is open", async () => {
+    expect(await checkPort("127.0.0.1", testPort)).toBeInstanceOf(Ok<void, HubError>);
+  });
+
+  it("should verify the port is closed", async () => {
+    const findAvailablePort = () =>
+      new Promise<number>((resolve, reject) => {
+        const server = createServer();
+        server.unref();
+        server.listen(0, () => {
+          const port = (server.address() as AddressInfo).port;
+          server.close(() => resolve(port));
+        });
+        server.on("error", reject);
+      });
+
+    const closedPort = await findAvailablePort();
+    expect(await checkPort("127.0.0.1", closedPort)).toBeInstanceOf(Err<void, HubError>);
   });
 });

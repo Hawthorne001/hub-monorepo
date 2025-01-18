@@ -1,5 +1,114 @@
 # @farcaster/hub-web
 
+## 0.9.5
+
+### Patch Changes
+
+- 913c0f67: feat: support twitter and github usernames
+- Updated dependencies [913c0f67]
+  - @farcaster/core@0.15.6
+
+## 0.9.4
+
+### Patch Changes
+
+- aa9cde75: feat: add user location to the protocol
+- Updated dependencies [aa9cde75]
+  - @farcaster/core@0.15.5
+
+## 0.9.3
+
+### Patch Changes
+
+- e5a86114: feat: support bulk message writing rpcs
+- Updated dependencies [f084daa1]
+- Updated dependencies [e5a86114]
+  - @farcaster/core@0.15.3
+
+## 0.9.2
+
+### Patch Changes
+
+- 321658b7: support streaming for sync/reconciliation
+- Updated dependencies [321658b7]
+  - @farcaster/core@0.15.2
+
+## 0.9.1
+
+### Patch Changes
+
+- cc0d0a3e: feat: added start/stop time filters for bulk queries
+- Updated dependencies [fbd3ba5f]
+- Updated dependencies [cc0d0a3e]
+  - @farcaster/core@0.15.1
+
+## 0.9.0
+
+### Minor Changes
+
+- dd634c79: feat: Implement Storage Extension FIP
+
+### Patch Changes
+
+- Updated dependencies [dd634c79]
+  - @farcaster/core@0.15.0
+
+## 0.8.12
+
+### Patch Changes
+
+- c723f655: feat: Add endpoints to control sync
+
+## 0.8.11
+
+### Patch Changes
+
+- dab95118: Add rpc to expose LinkCompactStateMessage + explicit handling of type
+- Updated dependencies [dab95118]
+  - @farcaster/core@0.14.16
+
+## 0.8.10
+
+### Patch Changes
+
+- c424e111: feat: Add support for long casts
+- Updated dependencies [c424e111]
+  - @farcaster/core@0.14.15
+
+## 0.8.9
+
+### Patch Changes
+
+- c261fba6: added approxSize to getInfo()
+- 920f6c02: fix: grpcWeb import
+- Updated dependencies [c261fba6]
+  - @farcaster/core@0.14.12
+
+## 0.8.8
+
+### Patch Changes
+
+- 7b374890: feat: Add Link CompactStateMessage type for link compaction
+- Updated dependencies [ab9258af]
+- Updated dependencies [7b374890]
+  - @farcaster/core@0.14.11
+
+## 0.8.7
+
+### Patch Changes
+
+- 4c9fb617: feat: allow sharding event stream by fid
+- Updated dependencies [4c9fb617]
+  - @farcaster/core@0.14.10
+
+## 0.8.6
+
+### Patch Changes
+
+- 5ca5a4a5: feat: Add gossip MessageBundles
+- Updated dependencies [5ca5a4a5]
+  - @farcaster/core@0.14.9
+
 ## 0.8.5
 
 ### Patch Changes
@@ -127,7 +236,7 @@
 
 ### Patch Changes
 
-- 06bb2f43: chore: Go lang example for submitMessage()
+- 06bb2f43: chore: Golang example for submitMessage()
 - a5708f85: chore: Remove grpc-web
 - ba86d374: feat: Allow signing raw message data bytes to support rust, Golang etc...
 - Updated dependencies [ba86d374]

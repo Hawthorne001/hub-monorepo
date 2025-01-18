@@ -31,8 +31,9 @@ import {
   base58ToBytes,
   VerificationAddAddressMessage,
   recreateSolanaClaimMessage,
+  bytesCompare,
 } from "@farcaster/hub-nodejs";
-import { err, Ok, ok } from "neverthrow";
+import { err, Ok, ok, ResultAsync } from "neverthrow";
 import { jestRocksDB } from "../db/jestUtils.js";
 import Engine from "../engine/index.js";
 import { sleep } from "../../utils/crypto.js";
@@ -40,13 +41,39 @@ import { getMessage, makeTsHash, typeToSetPostfix } from "../db/message.js";
 import { StoreEvents } from "../stores/storeEventHandler.js";
 import { IdRegisterOnChainEvent, makeVerificationAddressClaim } from "@farcaster/core";
 import { setReferenceDateForTest } from "../../utils/versions.js";
-import { getUserNameProof } from "../db/nameRegistryEvent.js";
 import { publicClient } from "../../test/utils.js";
 import { jest } from "@jest/globals";
+import { FNameRegistryEventsProvider, FNameTransfer } from "../../eth/fnameRegistryEventsProvider.js";
+import { MockFnameRegistryClient } from "../../test/mocks.js";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 const db = jestRocksDB("protobufs.engine.test");
 const network = FarcasterNetwork.TESTNET;
-const engine = new Engine(db, network, undefined, publicClient);
+
+const account = privateKeyToAccount(generatePrivateKey());
+const fNameClient = new MockFnameRegistryClient(account);
+
+// biome-ignore lint/style/useConst: cannot use lint as we need a reference before instantiation
+let engine: Engine;
+
+const fNameProvider = new FNameRegistryEventsProvider(
+  fNameClient,
+  // Mock version of the hub interface
+  {
+    submitUserNameProof: (proof: UserNameProof) => engine.mergeUserNameProof(proof),
+    getHubState: () => ResultAsync.fromSafePromise(Promise.resolve({ lastFnameProof: 0 })),
+    putHubState: () => undefined,
+    // biome-ignore lint/suspicious/noExplicitAny: mock doesn't specify full interface
+  } as any,
+  false,
+);
+
+// biome-ignore lint/suspicious/noExplicitAny: mock used only in tests
+const l2EventsProvider = jest.fn() as any;
+l2EventsProvider.retryEventsForFid = jest.fn();
+const retryEventsForFidMock = l2EventsProvider.retryEventsForFid;
+
+engine = new Engine(db, network, undefined, publicClient, undefined, fNameProvider, l2EventsProvider);
 
 const fid = Factories.Fid.build();
 const fname = Factories.Fname.build();
@@ -67,6 +94,11 @@ let verificationAdd: VerificationAddAddressMessage;
 let userDataAdd: UserDataAddMessage;
 
 beforeAll(async () => {
+  fNameClient.setTransfersToReturn([]);
+  // This forces the provider to fetch the signer address
+  await fNameProvider.start();
+  await fNameProvider.stop();
+
   signerKey = (await signer.getSignerKey())._unsafeUnwrap();
   custodySignerKey = (await custodySigner.getSignerKey())._unsafeUnwrap();
   custodyEvent = Factories.IdRegistryOnChainEvent.build({ fid }, { transient: { to: custodySignerKey } });
@@ -97,8 +129,22 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  engine.clearCache();
+  engine.clearCaches();
   engine.setSolanaVerifications(false);
+
+  const transferEvents: FNameTransfer[] = [
+    {
+      id: 1,
+      username: Buffer.from(fname).toString("utf-8"),
+      from: 0,
+      to: fid,
+      timestamp: 1686291736947,
+      owner: account.address,
+      server_signature: "",
+    },
+  ];
+
+  fNameClient.setTransfersToReturn([transferEvents]);
 });
 
 afterAll(async () => {
@@ -123,7 +169,7 @@ describe("mergeUserNameProof", () => {
   test("succeeds", async () => {
     const userNameProof = Factories.UserNameProof.build();
     await expect(engine.mergeUserNameProof(userNameProof)).resolves.toBeInstanceOf(Ok);
-    expect(await getUserNameProof(db, userNameProof.name)).toBeTruthy();
+    expect(await engine.getUserNameProof(userNameProof.name)).toBeTruthy();
   });
 });
 
@@ -183,6 +229,16 @@ describe("mergeMessage", () => {
           engine.getLink(fid, linkAdd.data.linkBody.type, linkAdd.data.linkBody.targetFid as number),
         ).resolves.toEqual(ok(linkAdd));
         expect(mergedMessages).toEqual([linkAdd]);
+      });
+
+      test("succeeds with CompactStateMessage with no targetFids", async () => {
+        setReferenceDateForTest(100000000000000000000000);
+        const compactStateMessage = await Factories.LinkCompactStateMessage.create(
+          { data: { fid, network } },
+          { transient: { signer } },
+        );
+        await expect(engine.mergeMessage(compactStateMessage)).resolves.toBeInstanceOf(Ok);
+        expect(mergedMessages).toEqual([compactStateMessage]);
       });
     });
 
@@ -456,10 +512,27 @@ describe("mergeMessage", () => {
           await expect(engine.mergeMessage(usernameAdd)).resolves.toBeInstanceOf(Ok);
         });
 
+        test("retries and succeeds when username proof has not been merged yet", async () => {
+          await expect(engine.mergeMessage(usernameAdd)).resolves.toBeInstanceOf(Ok);
+        });
+
         test("fails when fname transfer event is missing", async () => {
+          fNameClient.setTransfersToReturn([]);
           const result = await engine.mergeMessage(usernameAdd);
           expect(result).toMatchObject(err({ errCode: "bad_request.validation_failure" }));
           expect(result._unsafeUnwrapErr().message).toMatch("is not registered");
+        });
+
+        test("retries and succeeds when username proof has not been merged yet", async () => {
+          fNameClient.setTransfersToReturn([]);
+
+          for (let i = 0; i < 61; i++) {
+            await engine.mergeMessage(usernameAdd);
+          }
+
+          const result = await engine.mergeMessage(usernameAdd);
+          expect(result).toMatchObject(err({ errCode: "unavailable" }));
+          expect(result._unsafeUnwrapErr().message).toMatch("Too many requests to fName server");
         });
 
         test("fails when fname is owned by another fid", async () => {
@@ -589,7 +662,7 @@ describe("mergeMessage", () => {
       await engine.mergeOnChainEvent(Factories.SignerOnChainEvent.build({ fid }));
 
       const result = await engine.mergeMessage(reactionAdd);
-      expect(result).toMatchObject(err({ errCode: "bad_request.validation_failure" }));
+      expect(result).toMatchObject(err({ errCode: "bad_request.unknown_signer" }));
       expect(result._unsafeUnwrapErr().message).toMatch("invalid signer");
     });
 
@@ -599,7 +672,7 @@ describe("mergeMessage", () => {
       await engine.mergeOnChainEvent(Factories.SignerOnChainEvent.build({ fid }));
 
       const result = await engine.mergeMessage(linkAdd);
-      expect(result).toMatchObject(err({ errCode: "bad_request.validation_failure" }));
+      expect(result).toMatchObject(err({ errCode: "bad_request.unknown_signer" }));
       expect(result._unsafeUnwrapErr().message).toMatch("invalid signer");
     });
   });
@@ -610,7 +683,7 @@ describe("mergeMessage", () => {
     afterEach(async () => {
       const result = await engine.mergeMessage(message);
       const err = result._unsafeUnwrapErr();
-      expect(err.errCode).toEqual("bad_request.validation_failure");
+      expect(err.errCode).toEqual("bad_request.unknown_fid");
       expect(err.message).toMatch("unknown fid");
     });
 
@@ -910,6 +983,43 @@ describe("mergeMessage", () => {
         expect(result._unsafeUnwrapErr().message).toMatch("failed to resolve ens");
       });
 
+      test("fails when fid on message doesn't match fid on ens name proof", async () => {
+        const fid2 = Factories.Fid.build();
+        const signer2 = Factories.Ed25519Signer.build();
+        const custodySigner2 = Factories.Eip712Signer.build();
+        const signerKey2 = (await signer2.getSignerKey())._unsafeUnwrap();
+        const custodySignerKey2 = (await custodySigner2.getSignerKey())._unsafeUnwrap();
+        const custodyEvent2 = Factories.IdRegistryOnChainEvent.build(
+          { fid: fid2 },
+          { transient: { to: custodySignerKey2 } },
+        );
+        const signerAddEvent2 = Factories.SignerOnChainEvent.build(
+          { fid: fid2 },
+          { transient: { signer: signerKey2 } },
+        );
+        const storageEvent2 = Factories.StorageRentOnChainEvent.build({ fid: fid2 });
+        await engine.mergeOnChainEvent(custodyEvent2);
+        await engine.mergeOnChainEvent(signerAddEvent2);
+        await engine.mergeOnChainEvent(storageEvent2);
+
+        const spoofedUserDataAdd = await Factories.UserDataAddMessage.create(
+          {
+            data: {
+              fid: fid2,
+              userDataBody: {
+                type: UserDataType.USERNAME,
+                value: "test123.eth",
+              },
+            },
+          },
+          { transient: { signer: signer2 } },
+        );
+
+        const result = await engine.mergeMessage(spoofedUserDataAdd);
+        expect(result).toMatchObject(err({ errCode: "bad_request.validation_failure" }));
+        expect(result._unsafeUnwrapErr().message).toMatch(`fid ${fid} does not match message fid ${fid2}`);
+      });
+
       test("revokes the user data add when the username proof is revoked", async () => {
         const result = await engine.mergeMessage(userDataAdd);
         expect(result.isOk()).toBeTruthy();
@@ -986,10 +1096,105 @@ describe("mergeMessages", () => {
 
   test("succeeds and merges messages in parallel", async () => {
     const results = await engine.mergeMessages([castAdd, reactionAdd, linkAdd, userDataAdd, verificationAdd]);
-    for (const result of results) {
-      expect(result).toBeInstanceOf(Ok);
+    for (let i = 0; i < results.size; i++) {
+      expect(results.get(i)).toBeInstanceOf(Ok);
     }
     expect(new Set(mergedMessages)).toEqual(new Set([castAdd, reactionAdd, linkAdd, userDataAdd, verificationAdd]));
+  });
+
+  test("succeeds with linkAdd and compaction messages", async () => {
+    const linkCompactState = await Factories.LinkCompactStateMessage.create(
+      {
+        data: {
+          fid,
+          linkCompactStateBody: { targetFids: [linkAdd.data.linkBody.targetFid as number] },
+          timestamp: linkAdd.data.timestamp + 1,
+        },
+      },
+      { transient: { signer } },
+    );
+
+    // Merge them together
+    const results = await engine.mergeMessages([linkAdd, linkCompactState]);
+
+    expect(results.size).toBe(2);
+    expect(results.get(0)).toBeInstanceOf(Ok);
+    expect(results.get(1)).toBeInstanceOf(Ok);
+
+    expect(new Set(mergedMessages)).toEqual(new Set([linkAdd, linkCompactState]));
+  });
+
+  test("Correctly handles incorrect messages per store", async () => {
+    const castAdd2 = await Factories.CastAddMessage.create({ data: { fid, network } }, { transient: { signer } });
+    const results = await engine.mergeMessages([castAdd, castAdd2, castAdd2, linkAdd]);
+    expect(results.size).toBe(4);
+
+    expect(results.get(0)).toBeInstanceOf(Ok);
+    expect(results.get(1)).toBeInstanceOf(Ok);
+    expect(results.get(2)).toMatchObject(err({ errCode: "bad_request.duplicate" }));
+    expect(results.get(3)).toBeInstanceOf(Ok);
+  });
+
+  test("Handles validation errors", async () => {
+    const badCastAdd = await Factories.CastAddMessage.create({ data: { fid: 0, network } }, { transient: { signer } });
+    let results = await engine.mergeMessages([verificationAdd, badCastAdd, castAdd]);
+    expect(results.size).toBe(3);
+
+    expect(results.get(0)).toBeInstanceOf(Ok);
+    expect(results.get(1)).toMatchObject(err({ errCode: "bad_request.unknown_fid" }));
+    expect(retryEventsForFidMock).toHaveBeenLastCalledWith(0);
+    expect(results.get(2)).toBeInstanceOf(Ok);
+
+    const fid2 = Factories.Fid.build();
+    const signer2 = Factories.Ed25519Signer.build();
+    const custodySigner2 = Factories.Eip712Signer.build();
+    const signerKey2 = (await signer2.getSignerKey())._unsafeUnwrap();
+    const custodySignerKey2 = (await custodySigner2.getSignerKey())._unsafeUnwrap();
+    const custodyEvent2 = Factories.IdRegistryOnChainEvent.build(
+      { fid: fid2 },
+      { transient: { to: custodySignerKey2 } },
+    );
+    const signerAddEvent2 = Factories.SignerOnChainEvent.build({ fid: fid2 }, { transient: { signer: signerKey2 } });
+    const storageEvent2 = Factories.StorageRentOnChainEvent.build({ fid: fid2 });
+
+    const castAdd2 = await Factories.CastAddMessage.create(
+      { data: { fid: fid2, network } },
+      { transient: { signer: signer2 } },
+    );
+
+    // Adding without custody address is invalid
+    results = await engine.mergeMessages([reactionAdd, castAdd2]);
+    expect(results.size).toBe(2);
+
+    expect(results.get(0)).toBeInstanceOf(Ok);
+    expect(results.get(1)).toMatchObject(err({ errCode: "bad_request.unknown_fid" }));
+    expect(retryEventsForFidMock).toHaveBeenLastCalledWith(fid2);
+
+    // Add custody address, but adding without signer is invalid
+    await engine.mergeOnChainEvent(custodyEvent2);
+    results = await engine.mergeMessages([castAdd2, linkAdd]);
+    expect(results.size).toBe(2);
+
+    expect(results.get(0)).toMatchObject(err({ errCode: "bad_request.unknown_signer" }));
+    expect(retryEventsForFidMock).toHaveBeenLastCalledWith(fid2);
+    expect(results.get(1)).toBeInstanceOf(Ok);
+
+    // Add signer address, but adding without storage is invalid
+    await engine.mergeOnChainEvent(signerAddEvent2);
+    results = await engine.mergeMessages([userDataAdd, castAdd2]);
+    expect(results.size).toBe(2);
+
+    expect(results.get(0)).toBeInstanceOf(Ok);
+    expect(results.get(1)).toMatchObject(err({ errCode: "bad_request.no_storage" }));
+    expect(retryEventsForFidMock).toHaveBeenLastCalledWith(fid2);
+
+    // Add the storage event, and now it should merge
+    await engine.mergeOnChainEvent(storageEvent2);
+    results = await engine.mergeMessages([castAdd2, verificationAdd]);
+    expect(results.size).toBe(2);
+
+    expect(results.get(0)).toBeInstanceOf(Ok);
+    expect(results.get(1)).toMatchObject(err({ errCode: "bad_request.duplicate" })); // verificationAdd is duplicate (It has already been merged above)
   });
 });
 
@@ -1034,7 +1239,9 @@ describe("revokeMessagesBySigner", () => {
     for (const message of signerMessages) {
       await expect(checkMessage(message)).rejects.toThrow();
     }
-    expect(revokedMessages).toEqual(signerMessages);
+    expect(revokedMessages.sort((a, b) => bytesCompare(a.hash, b.hash))).toEqual(
+      signerMessages.sort((a, b) => bytesCompare(a.hash, b.hash)),
+    );
   });
 });
 
@@ -1085,7 +1292,9 @@ describe("with listeners and workers", () => {
 
       expect(revokedMessages).toEqual([]);
       await sleep(200); // Wait for engine to revoke messages
-      expect(revokedMessages).toEqual([castAdd, reactionAdd, linkAdd]);
+      expect(revokedMessages.sort((a, b) => bytesCompare(a.hash, b.hash))).toEqual(
+        [castAdd, reactionAdd, linkAdd].sort((a, b) => bytesCompare(a.hash, b.hash)),
+      );
     });
 
     test("does not revoke UserDataAdd when fname is transferred to different address but same fid", async () => {

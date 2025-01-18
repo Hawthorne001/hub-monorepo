@@ -7,6 +7,9 @@ import {
   getSSLHubRpcClient,
   toFarcasterTime,
   fromFarcasterTime,
+  bytesToHexString,
+  hexStringToBytes,
+  makeEventId,
 } from "@farcaster/hub-nodejs";
 import path from "path";
 import * as repl from "repl";
@@ -18,6 +21,8 @@ import { FactoriesCommand, ProtobufCommand } from "./protobufCommand.js";
 import { RpcClientCommand } from "./rpcClientCommand.js";
 import { WarpcastTestCommand } from "./warpcastTestCommand.js";
 import { SyncId } from "../network/sync/syncId.js";
+import { TrackHubDelayCommand } from "./trackHubDelayCommand.js";
+import { extractEventTimestamp } from "@farcaster/core";
 
 export const DEFAULT_RPC_CONSOLE = "127.0.0.1:2283";
 
@@ -67,6 +72,7 @@ export const startConsole = async (addressString: string, useInsecure: boolean) 
     new GenCommand(rpcClient, adminClient),
     new WarpcastTestCommand(rpcClient, adminClient),
     new AdminCommand(adminClient),
+    new TrackHubDelayCommand(rpcClient),
   ];
 
   replServer.defineCommand("help", {
@@ -92,6 +98,10 @@ export const startConsole = async (addressString: string, useInsecure: boolean) 
   replServer.context["SyncId"] = SyncId;
   replServer.context["toFarcasterTime"] = toFarcasterTime;
   replServer.context["fromFarcasterTime"] = fromFarcasterTime;
+  replServer.context["bytesToHex"] = bytesToHexString;
+  replServer.context["hexToBytes"] = hexStringToBytes;
+  replServer.context["extractEventTimestamp"] = extractEventTimestamp;
+  replServer.context["makeEventId"] = makeEventId;
 
   // Run the info command to start
 

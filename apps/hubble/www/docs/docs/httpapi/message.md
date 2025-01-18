@@ -86,7 +86,7 @@ try {
 
 ## validateMessage
 Validate a signed protobuf-serialized message with the Hub. This can be used to verify that the hub will consider the 
-message valid. Or to validate message that cannot be submitted (e.g. Frame actions) 
+message valid. Or to validate messages that cannot be submitted (e.g. Frame actions) 
 
 **Query Parameters**
 | Parameter | Description | Example |
@@ -131,7 +131,7 @@ curl -X POST "http://127.0.0.1:2281/v1/validateMessage" \
 }
 ```
 
-## Using with Rust, Go or other programing languages
+## Using with Rust, Go or other programming languages
 Messages need to be signed with a ED25519 signer belonging to the FID. If you are using a different programming language than Typescript, you can manually construct the `MessageData` object and serialize it to the `data_bytes` field of the message. Then, use the `data_bytes` to compute the `hash` and `signature`. Please see the [`rust-submitmessage` example](https://github.com/farcasterxyz/hub-monorepo/tree/main/packages/hub-web/examples) for more details
 
 
@@ -168,7 +168,7 @@ async fn main() {
 
     let msg_data_bytes = msg_data.write_to_bytes().unwrap();
     
-    // Calculate the blake3 hash, trucated to 20 bytes
+    // Calculate the blake3 hash, truncated to 20 bytes
     let hash = blake3::hash(&msg_data_bytes).as_bytes()[0..20].to_vec();
 
     // Construct the actual message
@@ -193,7 +193,7 @@ async fn main() {
 
     // Finally, submit the message to the network
 
-    // Create a reqwest Client
+    // Create a request Client
     let client = Client::new();
 
     // Define your endpoint URL

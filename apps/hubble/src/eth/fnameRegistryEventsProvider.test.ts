@@ -1,81 +1,13 @@
-import {
-  FNameRegistryClientInterface,
-  FNameRegistryEventsProvider,
-  FNameTransfer,
-  FNameTransferRequest,
-} from "./fnameRegistryEventsProvider.js";
+import { FNameRegistryEventsProvider, FNameTransfer } from "./fnameRegistryEventsProvider.js";
 import { jestRocksDB } from "../storage/db/jestUtils.js";
 import Engine from "../storage/engine/index.js";
-import { ViemLocalEip712Signer, makeUserNameProofClaim, FarcasterNetwork } from "@farcaster/core";
-import { MockHub } from "../test/mocks.js";
-import { getUserNameProof } from "../storage/db/nameRegistryEvent.js";
+import { FarcasterNetwork } from "@farcaster/core";
+import { MockFnameRegistryClient, MockHub } from "../test/mocks.js";
 import { utf8ToBytes } from "@noble/curves/abstract/utils";
-import { generatePrivateKey, privateKeyToAccount, PrivateKeyAccount, Address } from "viem/accounts";
-import { bytesToHex } from "viem";
+import { generatePrivateKey, privateKeyToAccount, Address } from "viem/accounts";
 import { HubState } from "@farcaster/hub-nodejs";
-
-class MockFnameRegistryClient implements FNameRegistryClientInterface {
-  private transfersToReturn: FNameTransfer[][] = [];
-  private minimumSince = 0;
-  private timesToThrow = 0;
-  private account: PrivateKeyAccount;
-  private signer: ViemLocalEip712Signer;
-  private signerAddress: Address;
-
-  constructor(account: PrivateKeyAccount) {
-    this.account = account;
-    this.signer = new ViemLocalEip712Signer(account);
-    this.signerAddress = account.address;
-  }
-
-  setTransfersToReturn(transfers: FNameTransfer[][]) {
-    this.transfersToReturn = transfers;
-    this.transfersToReturn.flat(2).forEach(async (t) => {
-      if (t.server_signature === "") {
-        t.server_signature = bytesToHex(
-          (
-            await this.signer.signUserNameProofClaim(
-              makeUserNameProofClaim({
-                name: t.username,
-                owner: t.owner,
-                timestamp: t.timestamp,
-              }),
-            )
-          )._unsafeUnwrap(),
-        );
-      }
-    });
-  }
-
-  setMinimumSince(minimumSince: number) {
-    this.minimumSince = minimumSince;
-  }
-
-  setSignerAddress(address: Address) {
-    this.signerAddress = address;
-  }
-
-  throwOnce() {
-    this.timesToThrow = 1;
-  }
-
-  async getTransfers(params: FNameTransferRequest): Promise<FNameTransfer[]> {
-    if (this.timesToThrow > 0) {
-      this.timesToThrow--;
-      throw new Error("connection failed");
-    }
-    expect(params.from_id).toBeGreaterThanOrEqual(this.minimumSince);
-    const transfers = this.transfersToReturn.shift();
-    if (!transfers) {
-      return Promise.resolve([]);
-    }
-    return Promise.resolve(transfers);
-  }
-
-  async getSigner(): Promise<string> {
-    return this.signerAddress;
-  }
-}
+import StoreEventHandler from "storage/stores/storeEventHandler.js";
+import UserDataStore from "storage/stores/userDataStore.js";
 
 describe("fnameRegistryEventsProvider", () => {
   const db = jestRocksDB("protobufs.fnameRegistry.test");
@@ -141,9 +73,11 @@ describe("fnameRegistryEventsProvider", () => {
   describe("syncHistoricalEvents", () => {
     it("fetches all events from the beginning", async () => {
       await provider.start();
-      expect(await getUserNameProof(db, utf8ToBytes("test1"))).toBeTruthy();
-      expect(await getUserNameProof(db, utf8ToBytes("test2"))).toBeTruthy();
-      await expect(getUserNameProof(db, utf8ToBytes("test4"))).rejects.toThrowError("NotFound");
+      expect(await engine.getUserNameProof(utf8ToBytes("test1"))).toBeTruthy();
+      expect(await engine.getUserNameProof(utf8ToBytes("test2"))).toBeTruthy();
+      const failCase = await engine.getUserNameProof(utf8ToBytes("test4"));
+      expect(failCase.isErr()).toBeTruthy();
+      expect(failCase._unsafeUnwrapErr().errCode).toEqual("not_found");
       expect((await hub.getHubState())._unsafeUnwrap().lastFnameProof).toEqual(transferEvents[3]?.id);
     });
 
@@ -151,7 +85,7 @@ describe("fnameRegistryEventsProvider", () => {
       await hub.putHubState(HubState.create({ lastFnameProof: transferEvents[0]?.id ?? 0 }));
       mockFnameRegistryClient.setMinimumSince(transferEvents[0]?.id ?? 0);
       await provider.start();
-      expect(await getUserNameProof(db, utf8ToBytes("test2"))).toBeTruthy();
+      expect(await engine.getUserNameProof(utf8ToBytes("test2"))).toBeTruthy();
       expect((await hub.getHubState())._unsafeUnwrap().lastFnameProof).toEqual(transferEvents[3]?.id);
     });
 
@@ -164,14 +98,16 @@ describe("fnameRegistryEventsProvider", () => {
   describe("mergeTransfers", () => {
     it("deletes a proof from the db when a username is unregistered", async () => {
       await provider.start();
-      await expect(getUserNameProof(db, utf8ToBytes("test3"))).rejects.toThrowError("NotFound");
+      const failCase = await engine.getUserNameProof(utf8ToBytes("test3"));
+      expect(failCase.isErr()).toBeTruthy();
+      expect(failCase._unsafeUnwrapErr().errCode).toEqual("not_found");
     });
 
     it("does not fail if there are errors merging events", async () => {
       // Return duplicate events
       mockFnameRegistryClient.setTransfersToReturn([transferEvents, transferEvents]);
       await provider.start();
-      expect(await getUserNameProof(db, utf8ToBytes("test2"))).toBeTruthy();
+      expect(await engine.getUserNameProof(utf8ToBytes("test2"))).toBeTruthy();
     });
 
     it("does not merge when the signature is invalid", async () => {
@@ -187,7 +123,9 @@ describe("fnameRegistryEventsProvider", () => {
       invalidEvent.server_signature = "0x8773442740c17c9d0f0b87022c722f9a136206ed";
       mockFnameRegistryClient.setTransfersToReturn([[invalidEvent]]);
       await provider.start();
-      await expect(getUserNameProof(db, utf8ToBytes("test1"))).rejects.toThrowError("NotFound");
+      const failCase = await engine.getUserNameProof(utf8ToBytes("test1"));
+      expect(failCase.isErr()).toBeTruthy();
+      expect(failCase._unsafeUnwrapErr().errCode).toEqual("not_found");
     });
 
     it("succeeds for a known proof", async () => {
@@ -207,7 +145,7 @@ describe("fnameRegistryEventsProvider", () => {
       mockFnameRegistryClient.setTransfersToReturn([[proof]]);
       mockFnameRegistryClient.setSignerAddress("0xBc5274eFc266311015793d89E9B591fa46294741");
       await provider.start();
-      expect(await getUserNameProof(db, utf8ToBytes("farcaster"))).toBeTruthy();
+      expect(await engine.getUserNameProof(utf8ToBytes("farcaster"))).toBeTruthy();
     });
   });
 

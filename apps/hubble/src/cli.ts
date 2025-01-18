@@ -1,32 +1,40 @@
-import { FarcasterNetwork } from "@farcaster/hub-nodejs";
-import { peerIdFromString } from "@libp2p/peer-id";
-import { PeerId } from "@libp2p/interface-peer-id";
+import { FarcasterNetwork, farcasterNetworkFromJSON } from "@farcaster/hub-nodejs";
+import { Ed25519PeerId, PeerId, RSAPeerId, Secp256k1PeerId } from "@libp2p/interface";
 import { createEd25519PeerId, createFromProtobuf, exportToProtobuf } from "@libp2p/peer-id-factory";
-import { AddrInfo } from "@chainsafe/libp2p-gossipsub/types";
 import { Command } from "commander";
 import fs, { existsSync } from "fs";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { Result, ResultAsync } from "neverthrow";
 import { dirname, resolve } from "path";
-import { exit } from "process";
-import { APP_VERSION, FARCASTER_VERSION, Hub, HubOptions, S3_REGION } from "./hubble.js";
+import {
+  APP_VERSION,
+  FARCASTER_VERSION,
+  Hub,
+  HubOptions,
+  HubShutdownReason,
+  S3_REGION,
+  SNAPSHOT_S3_UPLOAD_BUCKET,
+} from "./hubble.js";
 import { logger } from "./utils/logger.js";
 import { addressInfoFromParts, hostPortFromString, ipMultiAddrStrFromAddressInfo, parseAddress } from "./utils/p2p.js";
 import { DEFAULT_RPC_CONSOLE, startConsole } from "./console/console.js";
 import RocksDB, { DB_DIRECTORY } from "./storage/db/rocksdb.js";
 import { parseNetwork } from "./utils/command.js";
-import { Config as DefaultConfig } from "./defaultConfig.js";
+import { Config as DefaultConfig, DEFAULT_CATCHUP_SYNC_SNAPSHOT_MESSAGE_LIMIT } from "./defaultConfig.js";
 import { profileStorageUsed } from "./profile/profile.js";
 import { profileRPCServer } from "./profile/rpcProfile.js";
 import { profileGossipServer } from "./profile/gossipProfile.js";
 import { getStatsdInitialization, initializeStatsd } from "./utils/statsd.js";
 import os from "os";
 import { startupCheck, StartupCheckStatus } from "./utils/startupCheck.js";
+import { printSyncHealth } from "./utils/syncHealth.js";
 import { mainnet, optimism } from "viem/chains";
 import { finishAllProgressBars } from "./utils/progressBars.js";
 import { MAINNET_BOOTSTRAP_PEERS } from "./bootstrapPeers.mainnet.js";
-import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import axios from "axios";
+import { r2Endpoint, snapshotURLAndMetadata } from "./utils/snapshot.js";
+import { DEFAULT_DIAGNOSTIC_REPORT_URL, initDiagnosticReporter } from "./utils/diagnosticReport.js";
+import { ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 
 /** A CLI to accept options from the user and start the Hub */
 
@@ -52,6 +60,12 @@ const parseNumber = (string: string) => {
   return number;
 };
 
+// Use [return flushAndExit(code)] instead of [process.exit(code)] to ensure that logs get written. Prefixing with [return] maintains the type inferencing you get from using [process.exit].
+const flushAndExit = (exitCode: number) => {
+  logger.flush();
+  process.exit(exitCode);
+};
+
 const app = new Command();
 app.name("hub").description("Farcaster Hub").version(APP_VERSION);
 
@@ -70,6 +84,10 @@ app
   .option("-c, --config <filepath>", "Path to the config file.")
   .option("--db-name <name>", "The name of the RocksDB instance. (default: rocks.hub._default)")
   .option("--process-file-prefix <prefix>", 'Prefix for file to which hub process number is written. (default: "")')
+  .option(
+    "--log-individual-messages",
+    "Log individual submitMessage. If disabled, log one line per second (default: disabled)",
+  )
 
   // Ethereum Options
   .option("-m, --eth-mainnet-rpc-url <url>", "RPC URL of a Mainnet ETH Node (or comma separated list of URLs)")
@@ -107,6 +125,7 @@ app
   .option("-g, --gossip-port <port>", `Port to use for gossip (default: ${DEFAULT_GOSSIP_PORT})`)
   .option("-r, --rpc-port <port>", `Port to use for gRPC  (default: ${DEFAULT_RPC_PORT})`)
   .option("-h, --http-api-port <port>", `Port to use for HTTP API (default: ${DEFAULT_HTTP_API_PORT})`)
+  .option("--announce-rpc-port <port>", `Port to announce the gRPC API is reachable via (default: ${DEFAULT_RPC_PORT})`)
   .option("--http-cors-origin <origin>", "CORS origin for HTTP API (default: *)")
   .option("--ip <ip-address>", 'IP address to listen on (default: "127.0.0.1")')
   .option("--announce-ip <ip-address>", "Public IP address announced to peers (default: fetched with external service)")
@@ -128,11 +147,27 @@ app
   .option("--enable-snapshot-to-s3", "Enable daily snapshots to be uploaded to S3. (default: disabled)")
   .option("--s3-snapshot-bucket <bucket>", "The S3 bucket to upload snapshots to")
   .option("--disable-snapshot-sync", "Disable syncing from snapshots. (default: enabled)")
+  .option("--catchup-sync-with-snapshot [boolean]", "Enable catchup sync with snapshot. (default: enabled)")
+  .option(
+    "--catchup-sync-snapshot-message-limit <number>",
+    `Difference in message count before triggering snapshot sync. (default: ${DEFAULT_CATCHUP_SYNC_SNAPSHOT_MESSAGE_LIMIT})`,
+  )
 
   // Metrics
   .option(
     "--statsd-metrics-server <host>",
     'The host to send statsd metrics to, eg "127.0.0.1:8125". (default: disabled)',
+  )
+
+  // Opt-out Diagnostics Reporting
+  .option(
+    "--opt-out-diagnostics [boolean]",
+    "Opt-out of sending diagnostics data to the Farcaster foundation. " +
+      "Diagnostics are used to troubleshoot user issues and improve health of the network. (default: disabled)",
+  )
+  .option(
+    "--diagnostic-report-url <url>",
+    `The URL to send diagnostic reports to. (default: ${DEFAULT_DIAGNOSTIC_REPORT_URL})`,
   )
 
   // Debugging options
@@ -157,22 +192,40 @@ app
       logger.flush();
 
       logger.warn(`signal '${signalName}' received`);
+      let shutdownReason: HubShutdownReason;
+      switch (signalName) {
+        case "SIGTERM":
+          shutdownReason = HubShutdownReason.SIG_TERM;
+          break;
+        case "uncaughtException":
+          shutdownReason = HubShutdownReason.EXCEPTION;
+          break;
+        case "unhandledRejection":
+          shutdownReason = HubShutdownReason.EXCEPTION;
+          break;
+        case "S3SnapshotUpload":
+          shutdownReason = HubShutdownReason.SELF_TERMINATED;
+          break;
+        default:
+          shutdownReason = HubShutdownReason.UNKNOWN;
+      }
+
       if (!isExiting) {
         isExiting = true;
         hub
-          .teardown()
+          .teardown(shutdownReason)
           .then(() => {
             logger.info("Hub stopped gracefully");
-            process.exit(0);
+            return flushAndExit(0);
           })
           .catch((err) => {
             logger.error({ reason: `Error stopping hub: ${err}` });
-            process.exit(1);
+            return flushAndExit(1);
           });
 
         setTimeout(() => {
           logger.fatal("Forcing exit after grace period");
-          process.exit(1);
+          return flushAndExit(1);
         }, SHUTDOWN_GRACE_PERIOD_MS);
       }
     };
@@ -194,7 +247,7 @@ app
         StartupCheckStatus.ERROR,
         `Hubble requires at least 16GB of RAM to run. Detected ${totalMemory}GB`,
       );
-      process.exit(1);
+      return flushAndExit(1);
     } else {
       startupCheck.printStartupCheckStatus(StartupCheckStatus.OK, `Detected ${totalMemory}GB of RAM`);
     }
@@ -282,7 +335,7 @@ app
           `Failed to read identity from ${cliOptions.id}. Please run "yarn identity create".`,
           "https://www.thehubble.xyz/intro/install.html#installing-hubble\n",
         );
-        process.exit(1);
+        return flushAndExit(1);
       } else {
         peerId = peerIdR.value;
       }
@@ -311,7 +364,7 @@ app
           "https://www.thehubble.xyz/intro/install.html#installing-hubble\n",
         );
 
-        process.exit(1);
+        return flushAndExit(1);
       } else {
         peerId = peerIdR.value;
       }
@@ -427,32 +480,7 @@ app
       );
     }
 
-    const directPeers = ((cliOptions.directPeers ?? hubConfig.directPeers ?? []) as string[])
-      .map((a) => parseAddress(a))
-      .map((a) => {
-        if (a.isErr()) {
-          logger.warn(
-            { errorCode: a.error.errCode, message: a.error.message },
-            "Couldn't parse direct peer address, ignoring",
-          );
-        } else if (a.value.getPeerId()) {
-          logger.warn(
-            { errorCode: "unavailable", message: "peer id missing from direct peer" },
-            "Direct peer missing peer id, ignoring",
-          );
-        }
-
-        return a;
-      })
-      .filter((a) => a.isOk() && a.value.getPeerId())
-      .map((a) => a._unsafeUnwrap())
-      .map((a) => {
-        return {
-          id: peerIdFromString(a.getPeerId() ?? ""),
-          addrs: [a],
-        } as AddrInfo;
-      });
-
+    const directPeers = (cliOptions.directPeers ?? hubConfig.directPeers ?? []) as string[];
     const rebuildSyncTrie = cliOptions.rebuildSyncTrie ?? hubConfig.rebuildSyncTrie ?? false;
     const profileSync = cliOptions.profileSync ?? hubConfig.profileSync ?? false;
 
@@ -463,8 +491,19 @@ app
       enableSnapshotToS3 = awsVerified;
     }
 
+    // Read catchupSyncWithSnapshot from 1. CLI option, 2. Environment variable, 3. Config file
+    let catchupSyncWithSnapshot: boolean;
+    if (cliOptions.catchupSyncWithSnapshot) {
+      catchupSyncWithSnapshot = cliOptions.catchupSyncWithSnapshot === "true";
+    } else if (process.env["CATCHUP_SYNC_WITH_SNAPSHOT"]) {
+      catchupSyncWithSnapshot = process.env["CATCHUP_SYNC_WITH_SNAPSHOT"] === "true";
+    } else {
+      catchupSyncWithSnapshot = hubConfig.catchupSyncWithSnapshot;
+    }
+
     const options: HubOptions = {
       peerId,
+      logIndividualMessages: cliOptions.logIndividualMessages ?? hubConfig.logIndividualMessages ?? false,
       ipMultiAddr: ipMultiAddrResult.value,
       rpcServerHost: hubAddressInfo.value.address,
       announceIp: cliOptions.announceIp ?? hubConfig.announceIp,
@@ -489,6 +528,12 @@ app
       allowedPeers: cliOptions.allowedPeers ?? hubConfig.allowedPeers,
       deniedPeers: cliOptions.deniedPeers ?? hubConfig.deniedPeers,
       rpcPort: cliOptions.rpcPort ?? hubConfig.rpcPort ?? DEFAULT_RPC_PORT,
+      announceRpcPort:
+        cliOptions.announceRpcPort ??
+        hubConfig.announceRpcPort ??
+        cliOptions.rpcPort ??
+        hubConfig.rpcPort ??
+        DEFAULT_RPC_PORT,
       httpApiPort: cliOptions.httpApiPort ?? hubConfig.httpApiPort ?? DEFAULT_HTTP_API_PORT,
       httpCorsOrigin: cliOptions.httpCorsOrigin ?? hubConfig.httpCorsOrigin ?? "*",
       rpcAuth,
@@ -498,6 +543,9 @@ app
       resetDB: false,
       rebuildSyncTrie,
       profileSync,
+      catchupSyncWithSnapshot: catchupSyncWithSnapshot,
+      catchupSyncSnapshotMessageLimit:
+        cliOptions.catchupSyncSnapshotMessageLimit ?? hubConfig.catchupSyncSnapshotMessageLimit,
       resyncNameEvents: cliOptions.resyncNameEvents ?? hubConfig.resyncNameEvents ?? false,
       statsdParams: getStatsdInitialization(),
       commitLockTimeout: cliOptions.commitLockTimeout ?? hubConfig.commitLockTimeout,
@@ -512,6 +560,7 @@ app
       s3SnapshotBucket: cliOptions.s3SnapshotBucket ?? hubConfig.s3SnapshotBucket,
       hubOperatorFid: parseInt(cliOptions.hubOperatorFid ?? hubConfig.hubOperatorFid),
       connectToDbPeers: hubConfig.connectToDbPeers ?? true,
+      useStreaming: hubConfig.useStreaming ?? true,
     };
 
     // Startup check for Hub Operator FID
@@ -546,27 +595,37 @@ app
       );
     }
 
-    if (options.enableSnapshotToS3) {
-      // Set the Hub to exit (and be automatically restarted) so that the snapshot is uploaded
-      // before the Hub starts syncing
-      // Calculate and set a timeout to run at 9:10 am UTC (2:10 am PST)
-      const millisTill9 = millisTillRestart();
-      logger.info({ millisTill9 }, "Scheduling Hub to exit at 9:10 am UTC to upload snapshot to S3");
-
-      setTimeout(async () => {
-        logger.info("Exiting Hub to upload snapshot to S3");
-        handleShutdownSignal("S3SnapshotUpload");
-      }, millisTill9);
-    }
-
     await startupCheck.rpcCheck(options.ethMainnetRpcUrl, mainnet, "L1");
     await startupCheck.rpcCheck(options.l2RpcUrl, optimism, "L2", options.l2ChainId);
 
     if (startupCheck.anyFailedChecks()) {
       logger.fatal({ reason: "Startup checks failed" }, "shutting down hub");
-      logger.flush();
-      process.exit(1);
+      return flushAndExit(1);
     }
+
+    // Opt-out Diagnostics Reporting
+    let optOut: boolean;
+    if (process.env["HUB_OPT_OUT_DIAGNOSTICS"] || process.env["HUB_OPT_OUT_DIAGNOSTIC"]) {
+      if (process.env["HUB_OPT_OUT_DIAGNOSTICS"]) {
+        optOut = process.env["HUB_OPT_OUT_DIAGNOSTICS"] === "true";
+      } else {
+        optOut = process.env["HUB_OPT_OUT_DIAGNOSTIC"] === "true";
+      }
+    } else {
+      optOut = cliOptions.optOutDiagnostics ? cliOptions.optOutDiagnostics === "true" : hubConfig.optOutDiagnostics;
+    }
+    let reportURL: string;
+    if (process.env["HUB_DIAGNOSTIC_REPORT_URL"]) {
+      reportURL = process.env["HUB_DIAGNOSTIC_REPORT_URL"];
+    } else {
+      reportURL = cliOptions.diagnosticReportUrl ?? DEFAULT_DIAGNOSTIC_REPORT_URL;
+    }
+    initDiagnosticReporter({
+      optOut,
+      reportURL,
+      ...(options.hubOperatorFid && { fid: options.hubOperatorFid }),
+      ...(options.peerId && { peerId: options.peerId?.toString() }),
+    });
 
     const hubResult = Result.fromThrowable(
       () => new Hub(options),
@@ -576,10 +635,9 @@ app
       if (!startupCheck.anyFailedChecks()) {
         logger.fatal(hubResult.error);
         logger.fatal({ reason: "Hub Creation failed" }, "shutting down hub");
-
-        logger.flush();
       }
-      process.exit(1);
+
+      return flushAndExit(1);
     }
 
     if (statsDServer && !disableConsoleStatus) {
@@ -627,15 +685,42 @@ app
       logger.fatal(startResult.error);
       logger.fatal({ reason: "Hub Startup failed" }, "shutting down hub");
       try {
-        await hub.teardown();
+        await hub.teardown(HubShutdownReason.EXCEPTION);
       } finally {
-        logger.flush();
-        process.exit(1);
+        // Using return here would be unsafe
+        flushAndExit(1);
       }
     }
 
     process.stdin.resume();
   });
+
+/*//////////////////////////////////////////////////////////////
+                          SNAPSHOT-URL COMMAND
+//////////////////////////////////////////////////////////////*/
+const s3SnapshotURL = new Command("snapshot-url")
+  .description("Print latest snapshot URL and metadata from S3")
+  .option("-n --network <network>", "ID of the Farcaster Network (default: 1 (mainnet))", parseNetwork)
+  .option("-b --s3-snapshot-bucket <bucket>", "The S3 bucket that holds snapshot(s)")
+  .action(async (options) => {
+    const network = farcasterNetworkFromJSON(options.network ?? FarcasterNetwork.MAINNET);
+    if (network !== FarcasterNetwork.MAINNET) {
+      console.error("Only mainnet snapshots are supported at this time");
+      return flushAndExit(1);
+    }
+
+    const response = await snapshotURLAndMetadata(network, 0, options.s3SnapshotBucket);
+    if (response.isErr()) {
+      console.error("error fetching snapshot data", response.error);
+      return flushAndExit(1);
+    }
+    const [url, metadata] = response.value;
+    console.log(`${JSON.stringify(metadata, null, 2)}`);
+    console.log(`Download chunks under directory at: ${url}`);
+    return flushAndExit(1);
+  });
+
+app.addCommand(s3SnapshotURL);
 
 /*//////////////////////////////////////////////////////////////
                         IDENTITY COMMAND
@@ -644,7 +729,7 @@ app
 /** Write a given PeerId to a file */
 const writePeerId = async (peerId: PeerId, filepath: string) => {
   const directory = dirname(filepath);
-  const proto = exportToProtobuf(peerId);
+  const proto = exportToProtobuf(peerId as RSAPeerId | Ed25519PeerId | Secp256k1PeerId);
   // Handling: using try-catch is more ergonomic than capturing and handling throwable, since we
   // want a fast failure back to the CLI
   try {
@@ -679,7 +764,7 @@ const createIdCommand = new Command("create")
       await writePeerId(peerId, resolve(path));
     }
 
-    exit(0);
+    return flushAndExit(0);
   });
 
 const verifyIdCommand = new Command("verify")
@@ -688,7 +773,7 @@ const verifyIdCommand = new Command("verify")
   .action(async (options) => {
     const peerId = await readPeerId(options.id);
     logger.info(`Successfully Read peerId: ${peerId.toString()} from ${options.id}`);
-    exit(0);
+    return flushAndExit(0);
   });
 
 app
@@ -723,7 +808,7 @@ app
         "The 'status' command has been deprecated\n" +
         "Please use Grafana monitoring. See https://www.thehubble.xyz/intro/monitoring.html\n",
     );
-    exit(0);
+    return flushAndExit(0);
   });
 
 /*//////////////////////////////////////////////////////////////
@@ -749,7 +834,7 @@ const storageProfileCommand = new Command("storage")
     }
 
     await rocksDB.close();
-    exit(0);
+    return flushAndExit(0);
   });
 
 const rpcProfileCommand = new Command("rpc")
@@ -816,7 +901,7 @@ app
     }
 
     logger.info({ rocksDBName }, "Database cleared.");
-    exit(0);
+    return flushAndExit(0);
   });
 
 /*//////////////////////////////////////////////////////////////
@@ -841,35 +926,63 @@ const readPeerId = async (filePath: string) => {
   return createFromProtobuf(proto);
 };
 
+/*//////////////////////////////////////////////////////////////
+                          SYNC HEALTH COMMAND
+//////////////////////////////////////////////////////////////*/
+
+app
+  .command("sync-health")
+  .description("Measure sync health")
+  .requiredOption("--start-time-ofday <time>", "How many seconds ago to start the sync health query")
+  .requiredOption("--stop-time-ofday <time>", "How many seconds to count over")
+  .option("--max-num-peers <count>", "Maximum number of peers to measure for", "20")
+  .option("--primary-node <host:port>", "Node to measure all peers against (required)", "hoyt.farcaster.xyz:2283")
+  .option("--outfile <filename>", "File to output measurements to", "health.out")
+  .option("--peers <ip:port,...>", "Peers to compare with (default: pick random connected peers)")
+  .option("--username <username>", "Username for primary node")
+  .option("--password <password>", "Password for primary node")
+  .option("--use-secure-client-for-peers", "Use a secure rpc client for all peers", false)
+  .action(async (cliOptions) => {
+    await printSyncHealth(
+      cliOptions.startTimeOfday,
+      cliOptions.stopTimeOfday,
+      cliOptions.maxNumPeers,
+      cliOptions.primaryNode,
+      cliOptions.useSecureClientForPeers,
+      cliOptions.outfile,
+      cliOptions.peers ? cliOptions.peers.split(",") : undefined,
+      cliOptions.username,
+      cliOptions.password,
+    );
+  });
+
 app.parse(process.argv);
 
 ///////////////////////////////////////////////////////////////
 //                        UTILS
 ///////////////////////////////////////////////////////////////
-function millisTillRestart(): number {
-  // Calculate the number of milliseconds until 9:10 am UTC (2:10 am PST)
-  const now = new Date();
-  const timeAt9 = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 9, 10, 0, 0).getTime();
-
-  const millisTill9Tomorrow = timeAt9 + 24 * 60 * 60 * 1000 - now.getTime();
-  const millisTill9Today = timeAt9 - now.getTime();
-
-  return millisTill9Today > 0 ? millisTill9Today : millisTill9Tomorrow;
-}
 
 // Verify that we have access to the AWS credentials.
 // Either via environment variables or via the AWS credentials file
 async function verifyAWSCredentials(): Promise<boolean> {
-  const sts = new STSClient({ region: S3_REGION });
+  const s3 = new S3Client({
+    region: S3_REGION,
+    endpoint: r2Endpoint(),
+    forcePathStyle: true,
+  });
 
   try {
-    const identity = await sts.send(new GetCallerIdentityCommand({}));
+    const params = {
+      Bucket: SNAPSHOT_S3_UPLOAD_BUCKET,
+      Prefix: "snapshots/",
+    };
 
-    logger.info({ accountId: identity.Account }, "Verified AWS credentials");
+    const result = await s3.send(new ListObjectsV2Command(params));
+    logger.info({ keys: result.KeyCount }, "Verified R2 credentials for snapshots");
 
     return true;
   } catch (error) {
-    logger.error({ err: error }, "Failed to verify AWS credentials. No S3 snapshot upload will be performed.");
+    logger.error({ err: error }, "Failed to verify R2 credentials. No snapshots performed.");
     return false;
   }
 }

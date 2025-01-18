@@ -23,6 +23,7 @@ import {
   ValidationResponse,
   base58ToBytes,
   bytesToBase58,
+  SyncStatusResponse,
 } from "@farcaster/hub-nodejs";
 import { Metadata, ServerUnaryCall } from "@grpc/grpc-js";
 import fastify from "fastify";
@@ -30,9 +31,9 @@ import fastifyCors from "@fastify/cors";
 import { Result, err, ok } from "neverthrow";
 import { logger } from "../utils/logger.js";
 import { PageOptions } from "../storage/stores/types.js";
-import { DeepPartial } from "../storage/stores/store.js";
 import Engine from "../storage/engine/index.js";
 import { statsd } from "../utils/statsd.js";
+import { DeepPartial } from "storage/stores/rustStoreBase.js";
 
 const log = logger.child({ component: "HttpAPIServer" });
 
@@ -264,6 +265,29 @@ export class HttpAPIServer {
     this.app.get("/v1/currentPeers", (request, reply) => {
       const call = getCallObject("getCurrentPeers", {}, request);
       this.grpcImpl.getCurrentPeers(call, handleResponse(reply, ContactInfoResponse));
+    });
+
+    //================stopSync================
+    // @doc-tag: /stopSync
+    this.app.post("/v1/stopSync", (request, reply) => {
+      const call = getCallObject("stopSync", {}, request);
+      this.grpcImpl.stopSync(call, handleResponse(reply, SyncStatusResponse));
+    });
+
+    //================syncStatus================
+    // @doc-tag: /syncStatus?peer_id=...
+    this.app.get<{ Querystring: { peer_id: string } }>("/v1/syncStatus", (request, reply) => {
+      const { peer_id } = request.query;
+      const call = getCallObject("getSyncStatus", { peerId: peer_id }, request);
+      this.grpcImpl.getSyncStatus(call, handleResponse(reply, SyncStatusResponse));
+    });
+
+    //================forceSync================
+    // @doc-tag: /forceSync?peer_id=...
+    this.app.post<{ Querystring: { peer_id: string } }>("/v1/forceSync", (request, reply) => {
+      const { peer_id } = request.query;
+      const call = getCallObject("forceSync", { peerId: peer_id }, request);
+      this.grpcImpl.forceSync(call, handleResponse(reply, SyncStatusResponse));
     });
 
     //================Casts================

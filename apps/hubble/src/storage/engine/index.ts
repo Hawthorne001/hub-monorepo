@@ -6,17 +6,22 @@ import {
   CastId,
   CastRemoveMessage,
   FarcasterNetwork,
+  fromFarcasterTime,
+  getDefaultStoreLimit,
   getStoreLimits,
   hexStringToBytes,
   HubAsyncResult,
   HubError,
+  HubErrorCode,
   HubEvent,
   HubResult,
+  isLinkCompactStateMessage,
   isSignerOnChainEvent,
   isUserDataAddMessage,
   isUsernameProofMessage,
   isVerificationAddAddressMessage,
   LinkAddMessage,
+  LinkCompactStateMessage,
   LinkRemoveMessage,
   MergeOnChainEventHubEvent,
   MergeUsernameProofHubEvent,
@@ -34,7 +39,9 @@ import {
   SignerOnChainEvent,
   StorageLimit,
   StorageLimitsResponse,
+  StorageUnitType,
   StoreType,
+  toFarcasterTime,
   UserDataAddMessage,
   UserDataType,
   UserNameProof,
@@ -47,9 +54,9 @@ import {
 import { err, ok, ResultAsync } from "neverthrow";
 import fs from "fs";
 import { Worker } from "worker_threads";
-import { getMessage, getMessagesBySignerPrefix, typeToSetPostfix } from "../db/message.js";
+import { forEachMessageBySigner, typeToSetPostfix } from "../db/message.js";
 import RocksDB from "../db/rocksdb.js";
-import { TSHASH_LENGTH, UserPostfix } from "../db/types.js";
+import { UserPostfix } from "../db/types.js";
 import CastStore from "../stores/castStore.js";
 import LinkStore from "../stores/linkStore.js";
 import ReactionStore from "../stores/reactionStore.js";
@@ -60,16 +67,48 @@ import VerificationStore from "../stores/verificationStore.js";
 import { logger } from "../../utils/logger.js";
 import { RevokeMessagesBySignerJobQueue, RevokeMessagesBySignerJobWorker } from "../jobs/revokeMessagesBySignerJob.js";
 import { ensureAboveTargetFarcasterVersion } from "../../utils/versions.js";
-import { PublicClient } from "viem";
+import { type PublicClient } from "viem";
 import { normalize } from "viem/ens";
 import UsernameProofStore from "../stores/usernameProofStore.js";
 import OnChainEventStore from "../stores/onChainEventStore.js";
 import { consumeRateLimitByKey, getRateLimiterForTotalMessages, isRateLimitedByKey } from "../../utils/rateLimits.js";
 import { rsValidationMethods } from "../../rustfunctions.js";
-import { RateLimiterAbstract } from "rate-limiter-flexible";
+import { RateLimiterAbstract, RateLimiterMemory } from "rate-limiter-flexible";
 import { TypedEmitter } from "tiny-typed-emitter";
-import { ValidationWorkerData } from "./validation.worker.js";
+import { FNameRegistryEventsProvider } from "../../eth/fnameRegistryEventsProvider.js";
 import { statsd } from "../../utils/statsd.js";
+import { L2EventsProvider } from "eth/l2EventsProvider.js";
+
+export const NUM_VALIDATION_WORKERS = 2;
+
+export interface ValidationWorkerData {
+  l2RpcUrl: string;
+  ethMainnetRpcUrl: string;
+}
+
+export interface ValidationWorkerMessageWithMessage {
+  id: number;
+  message: Message;
+  errCode?: never;
+  errMessage?: never;
+}
+
+export interface ValidationWorkerMessageWithError {
+  id: number;
+  message?: never;
+  errCode: HubErrorCode;
+  errMessage: string;
+}
+
+interface IndexedMessage {
+  i: number;
+  message: Message;
+  fid?: number;
+  limiter?: RateLimiterAbstract;
+}
+
+// The type of response that the worker sends back to the main thread
+export type ValidationWorkerMessage = ValidationWorkerMessageWithMessage | ValidationWorkerMessageWithError;
 
 const log = logger.child({
   component: "Engine",
@@ -87,6 +126,8 @@ class Engine extends TypedEmitter<EngineEvents> {
   private _network: FarcasterNetwork;
   private _publicClient: PublicClient | undefined;
   private _l2PublicClient: PublicClient | undefined;
+  private _fNameRegistryEventsProvider: FNameRegistryEventsProvider | undefined;
+  private _l2EventsProvider: L2EventsProvider | undefined;
 
   private _linkStore: LinkStore;
   private _reactionStore: ReactionStore;
@@ -96,7 +137,8 @@ class Engine extends TypedEmitter<EngineEvents> {
   private _onchainEventsStore: OnChainEventStore;
   private _usernameProofStore: UsernameProofStore;
 
-  private _validationWorker: Worker | undefined;
+  private _validationWorkers: Worker[] | undefined;
+  private _nextValidationWorker = 0;
 
   private _validationWorkerJobId = 0;
   private _validationWorkerPromiseMap = new Map<number, (resolve: HubResult<Message>) => void>();
@@ -106,7 +148,9 @@ class Engine extends TypedEmitter<EngineEvents> {
 
   private _totalPruneSize: number;
 
-  private _solanaVerficationsEnabled = false;
+  private _solanaVerificationsEnabled = false;
+
+  private _fNameRetryRateLimiter = new RateLimiterMemory({ points: 60, duration: 60 }); // 60 retries per minute allowed
 
   constructor(
     db: RocksDB,
@@ -114,12 +158,16 @@ class Engine extends TypedEmitter<EngineEvents> {
     eventHandler?: StoreEventHandler,
     publicClient?: PublicClient,
     l2PublicClient?: PublicClient,
+    fNameRegistryEventsProvider?: FNameRegistryEventsProvider,
+    l2EventsProvider?: L2EventsProvider,
   ) {
     super();
     this._db = db;
     this._network = network;
     this._publicClient = publicClient;
     this._l2PublicClient = l2PublicClient;
+    this._fNameRegistryEventsProvider = fNameRegistryEventsProvider;
+    this._l2EventsProvider = l2EventsProvider;
 
     this.eventHandler = eventHandler ?? new StoreEventHandler(db);
 
@@ -131,15 +179,14 @@ class Engine extends TypedEmitter<EngineEvents> {
     this._onchainEventsStore = new OnChainEventStore(db, this.eventHandler);
     this._usernameProofStore = new UsernameProofStore(db, this.eventHandler);
 
-    // Calculate total storage available per unit of store. Note that OnChainEventStore
-    // is not included in this calculation because it is not pruned.
+    // Total set size for all stores. We should probably reduce this to just the size of the cast store.
     this._totalPruneSize =
-      this._linkStore.pruneSizeLimit +
-      this._reactionStore.pruneSizeLimit +
-      this._castStore.pruneSizeLimit +
-      this._userDataStore.pruneSizeLimit +
-      this._verificationStore.pruneSizeLimit +
-      this._usernameProofStore.pruneSizeLimit;
+      getDefaultStoreLimit(StoreType.CASTS, StorageUnitType.UNIT_TYPE_LEGACY) +
+      getDefaultStoreLimit(StoreType.LINKS, StorageUnitType.UNIT_TYPE_LEGACY) +
+      getDefaultStoreLimit(StoreType.REACTIONS, StorageUnitType.UNIT_TYPE_LEGACY) +
+      getDefaultStoreLimit(StoreType.USER_DATA, StorageUnitType.UNIT_TYPE_LEGACY) +
+      getDefaultStoreLimit(StoreType.USERNAME_PROOFS, StorageUnitType.UNIT_TYPE_LEGACY) +
+      getDefaultStoreLimit(StoreType.VERIFICATIONS, StorageUnitType.UNIT_TYPE_LEGACY);
 
     log.info({ totalPruneSize: this._totalPruneSize }, "total default storage limit size");
 
@@ -155,14 +202,12 @@ class Engine extends TypedEmitter<EngineEvents> {
 
     this._revokeSignerWorker.start();
 
-    if (!this._validationWorker) {
+    if (!this._validationWorkers) {
       const workerPath = "./build/storage/engine/validation.worker.js";
       try {
         if (fs.existsSync(workerPath)) {
-          this._validationWorker = new Worker(workerPath, { workerData: this.getWorkerData() });
-          log.info({ workerPath }, "created validation worker thread");
-
-          this._validationWorker.on("message", (data) => {
+          this._validationWorkers = [];
+          const validationWorkerHandler = (data: ValidationWorkerMessage) => {
             const { id, message, errCode, errMessage } = data;
             const resolve = this._validationWorkerPromiseMap.get(id);
 
@@ -176,7 +221,16 @@ class Engine extends TypedEmitter<EngineEvents> {
             } else {
               log.warn({ id }, "validation worker promise.response not found");
             }
-          });
+          };
+
+          const workerData = this.getWorkerData();
+          for (let i = 0; i < NUM_VALIDATION_WORKERS; i++) {
+            const validationWorker = new Worker(workerPath, { workerData });
+            validationWorker.on("message", validationWorkerHandler);
+            log.info({ workerPath }, "created validation worker thread");
+
+            this._validationWorkers.push(validationWorker);
+          }
         } else {
           log.warn({ workerPath }, "validation.worker.js not found, falling back to main thread");
         }
@@ -199,10 +253,13 @@ class Engine extends TypedEmitter<EngineEvents> {
 
     this._revokeSignerWorker.start();
 
-    if (this._validationWorker) {
-      await this._validationWorker.terminate();
-      this._validationWorker = undefined;
-      log.info("validation worker thread terminated");
+    if (this._validationWorkers) {
+      for (const worker of this._validationWorkers) {
+        await worker.terminate();
+      }
+
+      this._validationWorkers = undefined;
+      log.info("All validation worker threads terminated");
     }
     log.info("engine stopped");
   }
@@ -211,104 +268,185 @@ class Engine extends TypedEmitter<EngineEvents> {
     return this._db;
   }
 
-  clearCache() {
-    this._onchainEventsStore.clearActiveSignerCache();
+  clearCaches() {
+    this._onchainEventsStore.clearCaches();
   }
 
-  get solanaVerficationsEnabled(): boolean {
-    return this._solanaVerficationsEnabled;
+  get solanaVerificationsEnabled(): boolean {
+    return this._solanaVerificationsEnabled;
   }
 
   setSolanaVerifications(enabled: boolean) {
-    if (this._solanaVerficationsEnabled !== enabled) {
-      this._solanaVerficationsEnabled = enabled;
+    if (this._solanaVerificationsEnabled !== enabled) {
+      this._solanaVerificationsEnabled = enabled;
       logger.info(`Solana verifications toggled to: ${enabled}`);
     }
   }
 
-  async mergeMessages(messages: Message[]): Promise<Array<HubResult<number>>> {
-    return Promise.all(messages.map((message) => this.mergeMessage(message)));
-  }
-
-  async mergeMessage(message: Message): HubAsyncResult<number> {
+  async computeMergeResult(message: Message, i: number) {
+    const fid = message.data?.fid ?? 0;
     const validatedMessage = await this.validateMessage(message);
     if (validatedMessage.isErr()) {
       return err(validatedMessage.error);
     }
 
-    // Extract the FID that this message was signed by
-    const fid = message.data?.fid ?? 0;
-    const storageUnits = await this.eventHandler.getCurrentStorageUnitsForFid(fid);
-    let limiter: RateLimiterAbstract | undefined;
-
-    if (storageUnits.isOk()) {
-      if (storageUnits.value === 0) {
-        return err(new HubError("bad_request.prunable", "no storage"));
-      }
-      // We rate limit the number of messages that can be merged per FID
-      limiter = getRateLimiterForTotalMessages(storageUnits.value * this._totalPruneSize);
-      const isRateLimited = await isRateLimitedByKey(`${fid}`, limiter);
-      if (isRateLimited) {
-        log.warn({ fid }, "rate limit exceeded for FID");
-        return err(new HubError("unavailable", `rate limit exceeded for FID ${fid}`));
-      }
+    const storageSlot = await this.eventHandler.getCurrentStorageSlotForFid(fid);
+    if (storageSlot.isErr()) {
+      return err(storageSlot.error);
     }
 
-    const start = Date.now();
-    const mergeResult = await this.mergeMessageToStore(message);
-
-    if (mergeResult.isOk() && limiter) {
-      const timeTakenMs = Date.now() - start;
-
-      const messagePostFix = typeToSetPostfix(message.data?.type ?? MessageType.NONE);
-      if (messagePostFix === UserPostfix.ReactionMessage || messagePostFix === UserPostfix.UserDataMessage) {
-        statsd().timing("engine.merge.rust", timeTakenMs);
-      } else {
-        statsd().timing("engine.merge.nodejs", timeTakenMs);
-      }
-      consumeRateLimitByKey(`${fid}`, limiter);
+    const totalUnits = storageSlot.value.legacy_units + storageSlot.value.units;
+    if (totalUnits === 0) {
+      return err(new HubError("bad_request.no_storage", "no storage"));
     }
 
-    return mergeResult;
+    const limiter = getRateLimiterForTotalMessages(totalUnits * this._totalPruneSize);
+    const isRateLimited = await isRateLimitedByKey(`${fid}`, limiter);
+    if (isRateLimited) {
+      log.warn({ fid }, "rate limit exceeded for FID");
+      return err(new HubError("unavailable", `rate limit exceeded for FID ${fid}`));
+    }
+
+    return ok({ i, fid, limiter, message });
   }
 
-  async mergeMessageToStore(message: Message): HubAsyncResult<number> {
-    // Frame actions cannot be stored
-    if (message.data?.type === MessageType.FRAME_ACTION) {
-      return err(new HubError("bad_request.validation_failure", "invalid message type"));
-    }
+  async mergeMessages(messages: Message[]): Promise<Map<number, HubResult<number>>> {
+    const mergeResults: Map<number, HubResult<number>> = new Map();
+    const validatedMessages: IndexedMessage[] = [];
 
-    // biome-ignore lint/style/noNonNullAssertion: legacy code, avoid using ignore for new code
-    const setPostfix = typeToSetPostfix(message.data!.type);
-
-    switch (setPostfix) {
-      case UserPostfix.LinkMessage: {
-        const versionCheck = ensureAboveTargetFarcasterVersion("2023.4.19");
-        if (versionCheck.isErr()) {
-          return err(versionCheck.error);
+    // Validate all messages first
+    await Promise.all(
+      messages.map(async (message, i) => {
+        // Extract the FID that this message was signed by
+        // We rate limit the number of messages that can be merged per FID
+        const result = await this.computeMergeResult(message, i);
+        if (result.isErr()) {
+          mergeResults.set(i, result);
+          // Try to request on chain event if it's missing
+          if (
+            result.error.errCode === "bad_request.no_storage" ||
+            "bad_request.unknown_signer" ||
+            "bad_request.missing_fid"
+          ) {
+            const fid = message.data?.fid ?? 0;
+            // Don't await because we don't want to block hubs from processing new messages.
+            this._l2EventsProvider?.retryEventsForFid(fid);
+          }
+        } else {
+          validatedMessages.push(result.value);
         }
+      }),
+    );
 
-        return ResultAsync.fromPromise(this._linkStore.merge(message), (e) => e as HubError);
+    const results: Map<number, HubResult<number>> = await this.mergeMessagesToStore(
+      validatedMessages.map((m) => m.message),
+    );
+
+    // Go over the results and update the results map
+    for (const [j, result] of results.entries()) {
+      const fid = validatedMessages[j]?.fid as number;
+      const limiter = validatedMessages[j]?.limiter;
+      if (result.isOk() && limiter) {
+        consumeRateLimitByKey(`${fid}`, limiter);
       }
-      case UserPostfix.ReactionMessage: {
-        return ResultAsync.fromPromise(this._reactionStore.merge(message), (e) => e as HubError);
+      mergeResults.set(validatedMessages[j]?.i as number, result);
+    }
+
+    return mergeResults;
+  }
+
+  async mergeMessage(message: Message): HubAsyncResult<number> {
+    const result = await this.mergeMessages([message]);
+    return result.get(0) ?? err(new HubError("unavailable", "missing result"));
+  }
+
+  async mergeMessagesToStore(messages: Message[]): Promise<Map<number, HubResult<number>>> {
+    const linkMessages: IndexedMessage[] = [];
+    const reactionMessages: IndexedMessage[] = [];
+    const castMessages: IndexedMessage[] = [];
+    const userDataMessages: IndexedMessage[] = [];
+    const verificationMessages: IndexedMessage[] = [];
+    const usernameProofMessages: IndexedMessage[] = [];
+
+    const results: Map<number, HubResult<number>> = new Map();
+
+    for (let i = 0; i < messages.length; i++) {
+      const message = messages[i] as Message;
+      if (message.data?.type === MessageType.FRAME_ACTION) {
+        results.set(i, err(new HubError("bad_request.validation_failure", "invalid message type")));
+        continue;
       }
-      case UserPostfix.CastMessage: {
-        return ResultAsync.fromPromise(this._castStore.merge(message), (e) => e as HubError);
-      }
-      case UserPostfix.UserDataMessage: {
-        return ResultAsync.fromPromise(this._userDataStore.merge(message), (e) => e as HubError);
-      }
-      case UserPostfix.VerificationMessage: {
-        return ResultAsync.fromPromise(this._verificationStore.merge(message), (e) => e as HubError);
-      }
-      case UserPostfix.UsernameProofMessage: {
-        return ResultAsync.fromPromise(this._usernameProofStore.merge(message), (e) => e as HubError);
-      }
-      default: {
-        return err(new HubError("bad_request.validation_failure", "invalid message type"));
+
+      // biome-ignore lint/style/noNonNullAssertion: legacy code, avoid using ignore for new code
+      const setPostfix = typeToSetPostfix(message.data!.type);
+
+      switch (setPostfix) {
+        case UserPostfix.LinkCompactStateMessage:
+        case UserPostfix.LinkMessage: {
+          linkMessages.push({ i, message });
+          break;
+        }
+        case UserPostfix.ReactionMessage: {
+          reactionMessages.push({ i, message });
+          break;
+        }
+        case UserPostfix.CastMessage: {
+          castMessages.push({ i, message });
+          break;
+        }
+        case UserPostfix.UserDataMessage: {
+          userDataMessages.push({ i, message });
+          break;
+        }
+        case UserPostfix.VerificationMessage: {
+          verificationMessages.push({ i, message });
+          break;
+        }
+        case UserPostfix.UsernameProofMessage: {
+          usernameProofMessages.push({ i, message });
+          break;
+        }
+        default: {
+          results.set(i, err(new HubError("bad_request.validation_failure", "invalid message type")));
+        }
       }
     }
+
+    const stores = [
+      this._linkStore,
+      this._reactionStore,
+      this._castStore,
+      this._userDataStore,
+      this._verificationStore,
+      this._usernameProofStore,
+    ];
+    const messagesByStore = [
+      linkMessages,
+      reactionMessages,
+      castMessages,
+      userDataMessages,
+      verificationMessages,
+      usernameProofMessages,
+    ];
+
+    await Promise.all(
+      stores.map(async (store, storeIndex) => {
+        const storeMessages = messagesByStore[storeIndex] as IndexedMessage[];
+
+        const start = Date.now();
+        const storeResults: Map<number, HubResult<number>> = await store.mergeMessages(
+          storeMessages.map((m) => m.message),
+        );
+        const duration = Date.now() - start;
+        statsd().timing("storage.merge_messages", duration, { store: store.postfix.toString() });
+
+        for (const [j, v] of storeResults.entries()) {
+          results.set(storeMessages[j]?.i as number, v);
+        }
+      }),
+    );
+
+    return results;
   }
 
   async mergeOnChainEvent(event: OnChainEvent): HubAsyncResult<number> {
@@ -346,39 +484,32 @@ class Engine extends TypedEmitter<EngineEvents> {
 
     let revokedCount = 0;
 
-    const prefix = getMessagesBySignerPrefix(this._db, fid, signer);
-
-    const revokeMessageByKey = async (key: Buffer): HubAsyncResult<number | undefined> => {
-      const length = key.length;
-      const type = key.readUint8(length - TSHASH_LENGTH - 1);
-      const setPostfix = typeToSetPostfix(type);
-      const tsHash = Uint8Array.from(key.subarray(length - TSHASH_LENGTH));
-      const message = await ResultAsync.fromPromise(
-        getMessage(this._db, fid, setPostfix, tsHash),
-        (e) => e as HubError,
-      );
-      if (message.isErr()) {
-        return err(message.error);
+    const revokeMessage = async (message: Message): HubAsyncResult<number | undefined> => {
+      if (!message.data) {
+        return err(new HubError("bad_request.invalid_param", "missing message data"));
       }
 
-      switch (setPostfix) {
+      const postfix = typeToSetPostfix(message.data.type);
+
+      switch (postfix) {
+        case UserPostfix.LinkCompactStateMessage:
         case UserPostfix.LinkMessage: {
-          return this._linkStore.revoke(message.value);
+          return this._linkStore.revoke(message);
         }
         case UserPostfix.ReactionMessage: {
-          return this._reactionStore.revoke(message.value);
+          return this._reactionStore.revoke(message);
         }
         case UserPostfix.CastMessage: {
-          return this._castStore.revoke(message.value);
+          return this._castStore.revoke(message);
         }
         case UserPostfix.UserDataMessage: {
-          return this._userDataStore.revoke(message.value);
+          return this._userDataStore.revoke(message);
         }
         case UserPostfix.VerificationMessage: {
-          return this._verificationStore.revoke(message.value);
+          return this._verificationStore.revoke(message);
         }
         case UserPostfix.UsernameProofMessage: {
-          return this._usernameProofStore.revoke(message.value);
+          return this._usernameProofStore.revoke(message);
         }
         default: {
           return err(new HubError("bad_request.invalid_param", "invalid message type"));
@@ -386,8 +517,8 @@ class Engine extends TypedEmitter<EngineEvents> {
       }
     };
 
-    await this._db.forEachIteratorByPrefix(prefix, async (key) => {
-      const revokeResult = await revokeMessageByKey(key as Buffer);
+    await forEachMessageBySigner(this._db, fid, signer, async (message) => {
+      const revokeResult = await revokeMessage(message);
       revokeResult.match(
         () => {
           revokedCount += 1;
@@ -444,8 +575,8 @@ class Engine extends TypedEmitter<EngineEvents> {
   }
 
   /** revoke message if it is not valid */
-  async validateOrRevokeMessage(message: Message): HubAsyncResult<number | undefined> {
-    const isValid = await this.validateMessage(message);
+  async validateOrRevokeMessage(message: Message, lowPriority = false): HubAsyncResult<number | undefined> {
+    const isValid = await this.validateMessage(message, lowPriority);
 
     if (isValid.isErr() && message.data) {
       if (isValid.error.errCode === "unavailable.network_failure") {
@@ -455,6 +586,7 @@ class Engine extends TypedEmitter<EngineEvents> {
       const setPostfix = typeToSetPostfix(message.data.type);
 
       switch (setPostfix) {
+        case UserPostfix.LinkCompactStateMessage:
         case UserPostfix.LinkMessage: {
           return this._linkStore.revoke(message);
         }
@@ -497,6 +629,30 @@ class Engine extends TypedEmitter<EngineEvents> {
   /* -------------------------------------------------------------------------- */
   /*                             Cast Store Methods                             */
   /* -------------------------------------------------------------------------- */
+
+  validateStartAndStopTime(startTime?: number, stopTime?: number) {
+    let validatedStartTime;
+    if (startTime) {
+      const validatedStartTimeResult = validations.validateFarcasterTime(startTime);
+      if (validatedStartTimeResult.isErr()) {
+        return err(validatedStartTimeResult.error);
+      }
+
+      validatedStartTime = validatedStartTimeResult.value;
+    }
+
+    let validatedStopTime;
+    if (stopTime) {
+      const validatedStopTimeResult = validations.validateFarcasterTime(stopTime);
+      if (validatedStopTimeResult.isErr()) {
+        return err(validatedStopTimeResult.error);
+      }
+
+      validatedStopTime = validatedStopTimeResult.value;
+    }
+
+    return ok({ validatedStartTime, validatedStopTime });
+  }
 
   async getCast(fid: number, hash: Uint8Array): HubAsyncResult<CastAddMessage> {
     const validatedFid = validations.validateFid(fid);
@@ -543,8 +699,28 @@ class Engine extends TypedEmitter<EngineEvents> {
   async getAllCastMessagesByFid(
     fid: number,
     pageOptions: PageOptions = {},
+    startTime?: number,
+    stopTime?: number,
   ): HubAsyncResult<MessagesPage<CastAddMessage | CastRemoveMessage>> {
-    return ResultAsync.fromPromise(this._castStore.getAllCastMessagesByFid(fid, pageOptions), (e) => e as HubError);
+    const validatedFid = validations.validateFid(fid);
+    if (validatedFid.isErr()) {
+      return err(validatedFid.error);
+    }
+
+    const validatedTimes = this.validateStartAndStopTime(startTime, stopTime);
+    if (validatedTimes.isErr()) {
+      return err(validatedTimes.error);
+    }
+
+    return ResultAsync.fromPromise(
+      this._castStore.getAllCastMessagesByFid(
+        fid,
+        pageOptions,
+        validatedTimes.value.validatedStartTime,
+        validatedTimes.value.validatedStopTime,
+      ),
+      (e) => e as HubError,
+    );
   }
 
   /* -------------------------------------------------------------------------- */
@@ -602,14 +778,26 @@ class Engine extends TypedEmitter<EngineEvents> {
   async getAllReactionMessagesByFid(
     fid: number,
     pageOptions: PageOptions = {},
+    startTime?: number,
+    stopTime?: number,
   ): HubAsyncResult<MessagesPage<ReactionAddMessage | ReactionRemoveMessage>> {
     const validatedFid = validations.validateFid(fid);
     if (validatedFid.isErr()) {
       return err(validatedFid.error);
     }
 
+    const validatedTimes = this.validateStartAndStopTime(startTime, stopTime);
+    if (validatedTimes.isErr()) {
+      return err(validatedTimes.error);
+    }
+
     return ResultAsync.fromPromise(
-      this._reactionStore.getAllReactionMessagesByFid(fid, pageOptions),
+      this._reactionStore.getAllReactionMessagesByFid(
+        fid,
+        pageOptions,
+        validatedTimes.value.validatedStartTime,
+        validatedTimes.value.validatedStopTime,
+      ),
       (e) => e as HubError,
     );
   }
@@ -648,14 +836,26 @@ class Engine extends TypedEmitter<EngineEvents> {
   async getAllVerificationMessagesByFid(
     fid: number,
     pageOptions: PageOptions = {},
+    startTime?: number,
+    stopTime?: number,
   ): HubAsyncResult<MessagesPage<VerificationAddAddressMessage | VerificationRemoveMessage>> {
     const validatedFid = validations.validateFid(fid);
     if (validatedFid.isErr()) {
       return err(validatedFid.error);
     }
 
+    const validatedTimes = this.validateStartAndStopTime(startTime, stopTime);
+    if (validatedTimes.isErr()) {
+      return err(validatedTimes.error);
+    }
+
     return ResultAsync.fromPromise(
-      this._verificationStore.getAllVerificationMessagesByFid(fid, pageOptions),
+      this._verificationStore.getAllVerificationMessagesByFid(
+        fid,
+        pageOptions,
+        validatedTimes.value.validatedStartTime,
+        validatedTimes.value.validatedStopTime,
+      ),
       (e) => e as HubError,
     );
   }
@@ -718,13 +918,31 @@ class Engine extends TypedEmitter<EngineEvents> {
     return ResultAsync.fromPromise(this._userDataStore.getUserDataAdd(fid, type), (e) => e as HubError);
   }
 
-  async getUserDataByFid(fid: number, pageOptions: PageOptions = {}): HubAsyncResult<MessagesPage<UserDataAddMessage>> {
+  async getUserDataByFid(
+    fid: number,
+    pageOptions: PageOptions = {},
+    startTime?: number,
+    stopTime?: number,
+  ): HubAsyncResult<MessagesPage<UserDataAddMessage>> {
     const validatedFid = validations.validateFid(fid);
     if (validatedFid.isErr()) {
       return err(validatedFid.error);
     }
 
-    return ResultAsync.fromPromise(this._userDataStore.getUserDataAddsByFid(fid, pageOptions), (e) => e as HubError);
+    const validatedTimes = this.validateStartAndStopTime(startTime, stopTime);
+    if (validatedTimes.isErr()) {
+      return err(validatedTimes.error);
+    }
+
+    return ResultAsync.fromPromise(
+      this._userDataStore.getUserDataAddsByFid(
+        fid,
+        pageOptions,
+        validatedTimes.value.validatedStartTime,
+        validatedTimes.value.validatedStopTime,
+      ),
+      (e) => e as HubError,
+    );
   }
 
   async getOnChainEvents(type: OnChainEventType, fid: number): HubAsyncResult<OnChainEventResponse> {
@@ -750,13 +968,17 @@ class Engine extends TypedEmitter<EngineEvents> {
       return err(validatedFid.error);
     }
 
-    const units = await this.eventHandler.getCurrentStorageUnitsForFid(fid);
+    const slot = await this.eventHandler.getCurrentStorageSlotForFid(fid);
 
-    if (units.isErr()) {
-      return err(units.error);
+    if (slot.isErr()) {
+      return err(slot.error);
     }
 
-    const storeLimits = getStoreLimits(units.value);
+    const unitDetails = [
+      { unitType: StorageUnitType.UNIT_TYPE_LEGACY, unitSize: slot.value.legacy_units },
+      { unitType: StorageUnitType.UNIT_TYPE_2024, unitSize: slot.value.units },
+    ];
+    const storeLimits = getStoreLimits(unitDetails);
     const limits: StorageLimit[] = [];
     for (const limit of storeLimits) {
       const usageResult = await this.eventHandler.getUsage(fid, limit.storeType);
@@ -776,12 +998,13 @@ class Engine extends TypedEmitter<EngineEvents> {
       );
     }
     return ok({
-      units: units.value,
+      units: slot.value.units + slot.value.legacy_units,
       limits: limits,
+      unitDetails: unitDetails,
     });
   }
 
-  async getUserNameProof(name: Uint8Array): HubAsyncResult<UserNameProof> {
+  async getUserNameProof(name: Uint8Array, retries = 1): HubAsyncResult<UserNameProof> {
     const nameString = bytesToUtf8String(name);
     if (nameString.isErr()) {
       return err(nameString.error);
@@ -803,7 +1026,21 @@ class Engine extends TypedEmitter<EngineEvents> {
         return err(validatedFname.error);
       }
 
-      return ResultAsync.fromPromise(this._userDataStore.getUserNameProof(name), (e) => e as HubError);
+      const result = await ResultAsync.fromPromise(this._userDataStore.getUserNameProof(name), (e) => e as HubError);
+
+      if (result.isErr() && result.error.errCode === "not_found" && retries > 0 && this._fNameRegistryEventsProvider) {
+        const rateLimitResult = await ResultAsync.fromPromise(
+          this._fNameRetryRateLimiter.consume(0),
+          () => new HubError("unavailable", "Too many requests to fName server"),
+        );
+        if (rateLimitResult.isErr()) {
+          return err(rateLimitResult.error);
+        }
+        await this._fNameRegistryEventsProvider.retryTransferByName(name);
+        return this.getUserNameProof(name, retries - 1);
+      }
+
+      return result;
     }
   }
 
@@ -894,6 +1131,8 @@ class Engine extends TypedEmitter<EngineEvents> {
   async getAllLinkMessagesByFid(
     fid: number,
     pageOptions: PageOptions = {},
+    startTime?: number,
+    stopTime?: number,
   ): HubAsyncResult<MessagesPage<LinkAddMessage | LinkRemoveMessage>> {
     const versionCheck = ensureAboveTargetFarcasterVersion("2023.4.19");
     if (versionCheck.isErr()) {
@@ -905,7 +1144,40 @@ class Engine extends TypedEmitter<EngineEvents> {
       return err(validatedFid.error);
     }
 
-    return ResultAsync.fromPromise(this._linkStore.getAllLinkMessagesByFid(fid, pageOptions), (e) => e as HubError);
+    const validatedTimes = this.validateStartAndStopTime(startTime, stopTime);
+    if (validatedTimes.isErr()) {
+      return err(validatedTimes.error);
+    }
+
+    return ResultAsync.fromPromise(
+      this._linkStore.getAllLinkMessagesByFid(
+        fid,
+        pageOptions,
+        validatedTimes.value.validatedStartTime,
+        validatedTimes.value.validatedStopTime,
+      ),
+      (e) => e as HubError,
+    );
+  }
+
+  async getLinkCompactStateMessageByFid(
+    fid: number,
+    pageOptions: PageOptions = {},
+  ): HubAsyncResult<MessagesPage<LinkCompactStateMessage>> {
+    const versionCheck = ensureAboveTargetFarcasterVersion("2024.3.20");
+    if (versionCheck.isErr()) {
+      return err(versionCheck.error);
+    }
+
+    const validatedFid = validations.validateFid(fid);
+    if (validatedFid.isErr()) {
+      return err(validatedFid.error);
+    }
+
+    return ResultAsync.fromPromise(
+      this._linkStore.getLinkCompactStateMessageByFid(fid, pageOptions),
+      (e) => e as HubError,
+    );
   }
 
   /* -------------------------------------------------------------------------- */
@@ -930,7 +1202,7 @@ class Engine extends TypedEmitter<EngineEvents> {
     return ok(event);
   }
 
-  async validateMessage(message: Message): HubAsyncResult<Message> {
+  async validateMessage(message: Message, lowPriority = false): HubAsyncResult<Message> {
     // 1. Ensure message data is present
     if (!message || !message.data) {
       return err(new HubError("bad_request.validation_failure", "message data is missing"));
@@ -962,7 +1234,7 @@ class Engine extends TypedEmitter<EngineEvents> {
     }
 
     if (!custodyAddress) {
-      return err(new HubError("bad_request.validation_failure", `unknown fid: ${message.data.fid}`));
+      return err(new HubError("bad_request.unknown_fid", `unknown fid: ${message.data.fid}`));
     }
 
     // 4. Check that the signer is valid
@@ -976,7 +1248,7 @@ class Engine extends TypedEmitter<EngineEvents> {
       return hex.andThen((signerHex) => {
         return err(
           new HubError(
-            "bad_request.validation_failure",
+            "bad_request.unknown_signer",
             `invalid signer: signer ${signerHex} not found for fid ${message.data?.fid}`,
           ),
         );
@@ -1007,28 +1279,33 @@ class Engine extends TypedEmitter<EngineEvents> {
           return err(nameProof.error);
         }
 
-        if (nameProof.value.type === UserNameType.USERNAME_TYPE_FNAME) {
-          // Check that the fid for the fname and message are the same
-          if (nameProof.value.fid !== message.data.fid) {
-            return err(
-              new HubError(
-                "bad_request.validation_failure",
-                `fname fid ${nameProof.value.fid} does not match message fid ${message.data.fid}`,
-              ),
-            );
-          }
-        } else if (nameProof.value.type === UserNameType.USERNAME_TYPE_ENS_L1) {
+        if (
+          nameProof.value.type !== UserNameType.USERNAME_TYPE_FNAME &&
+          nameProof.value.type !== UserNameType.USERNAME_TYPE_ENS_L1
+        ) {
+          return err(new HubError("bad_request.validation_failure", "invalid username type"));
+        }
+
+        // Check that the fid for the fname/ens name and message are the same
+        if (nameProof.value.fid !== message.data.fid) {
+          return err(
+            new HubError(
+              "bad_request.validation_failure",
+              `fid ${nameProof.value.fid} does not match message fid ${message.data.fid}`,
+            ),
+          );
+        }
+
+        if (nameProof.value.type === UserNameType.USERNAME_TYPE_ENS_L1) {
           const result = await this.validateEnsUsernameProof(nameProof.value, custodyAddress);
           if (result.isErr()) {
             return err(result.error);
           }
-        } else {
-          return err(new HubError("bad_request.validation_failure", "invalid username type"));
         }
       }
     }
 
-    // For username proof messages, make sure the name resolves to the users custody address or a connected address actually owns the ens name
+    // 6. For username proof messages, make sure the name resolves to the users custody address or a connected address actually owns the ens name
     if (isUsernameProofMessage(message) && message.data.usernameProofBody.type === UserNameType.USERNAME_TYPE_ENS_L1) {
       const result = await this.validateEnsUsernameProof(message.data.usernameProofBody, custodyAddress);
       if (result.isErr()) {
@@ -1040,14 +1317,40 @@ class Engine extends TypedEmitter<EngineEvents> {
       isVerificationAddAddressMessage(message) &&
       message.data.verificationAddAddressBody.protocol === Protocol.SOLANA
     ) {
-      if (!this._solanaVerficationsEnabled) {
+      if (!this._solanaVerificationsEnabled) {
         return err(new HubError("bad_request.validation_failure", "solana verifications are not enabled"));
       }
     }
 
+    // LinkCompactStateMessages can't be more than 100 storage units
+    if (
+      isLinkCompactStateMessage(message) &&
+      message.data.linkCompactStateBody.targetFids.length >
+        getDefaultStoreLimit(StoreType.LINKS, StorageUnitType.UNIT_TYPE_LEGACY) * 100
+    ) {
+      return err(
+        new HubError("bad_request.validation_failure", "LinkCompactStateMessage is too big. Limit = 100 storage units"),
+      );
+    }
+
     // 6. Check message body and envelope
-    if (this._validationWorker) {
-      const worker = this._validationWorker;
+    if (this._validationWorkers) {
+      this._nextValidationWorker += 1;
+      this._nextValidationWorker = this._nextValidationWorker % this._validationWorkers.length;
+
+      // If this is a low-priority message and we're under load, only send it to the [0] worker,
+      // leaving the rest for high-priority messages
+      let workerIndex = this._nextValidationWorker;
+      if (this._validationWorkerPromiseMap.size > 100) {
+        if (lowPriority) {
+          workerIndex = 0;
+        } else {
+          // Send the high-priority message any but the first worker, which is reserved for the low-priority messages
+          workerIndex = this._nextValidationWorker === 0 ? 1 : this._nextValidationWorker;
+        }
+      }
+
+      const worker = this._validationWorkers[workerIndex] as Worker;
       return new Promise<HubResult<Message>>((resolve) => {
         const id = this._validationWorkerJobId++;
         this._validationWorkerPromiseMap.set(id, resolve);
@@ -1183,7 +1486,7 @@ class Engine extends TypedEmitter<EngineEvents> {
       clients[this._publicClient.chain.id] = this._publicClient;
     }
     if (this._l2PublicClient?.chain) {
-      clients[this._l2PublicClient.chain.id] = this._l2PublicClient;
+      clients[this._l2PublicClient.chain.id] = this._l2PublicClient as PublicClient;
     }
     return clients;
   }

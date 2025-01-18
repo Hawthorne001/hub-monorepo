@@ -1,7 +1,14 @@
 import { AdminServiceClient, HubServiceClient } from "./generated/rpc";
 import * as grpc from "@grpc/grpc-js";
 import { Metadata } from "@grpc/grpc-js";
-import type { CallOptions, Client, ClientReadableStream, ClientUnaryCall, ServiceError } from "@grpc/grpc-js";
+import type {
+  CallOptions,
+  Client,
+  ClientDuplexStream,
+  ClientReadableStream,
+  ClientUnaryCall,
+  ServiceError,
+} from "@grpc/grpc-js";
 import { err, ok } from "neverthrow";
 import { HubError, HubErrorCode, HubResult } from "@farcaster/core";
 
@@ -32,6 +39,8 @@ type OriginalStream<T, U> = (
   options?: Partial<CallOptions>,
 ) => ClientReadableStream<U>;
 
+type OriginalDuplexStream<T, U> = (metadata?: Metadata, options?: Partial<CallOptions>) => ClientDuplexStream<T, U>;
+
 type PromisifiedUnaryCall<T, U> = (
   request: T,
   metadata?: Metadata,
@@ -44,8 +53,15 @@ type PromisifiedStream<T, U> = (
   options?: Partial<CallOptions>,
 ) => Promise<HubResult<ClientReadableStream<U>>>;
 
+type PromisifiedDuplexStream<T, U> = (
+  metadata?: Metadata,
+  options?: Partial<CallOptions>,
+) => Promise<HubResult<ClientDuplexStream<T, U>>>;
+
 type PromisifiedClient<C> = { $: C; close: () => void } & {
-  [prop in Exclude<keyof C, keyof Client>]: C[prop] extends OriginalStream<infer T, infer U>
+  [prop in Exclude<keyof C, keyof Client>]: C[prop] extends OriginalDuplexStream<infer T, infer U>
+    ? PromisifiedDuplexStream<T, U>
+    : C[prop] extends OriginalStream<infer T, infer U>
     ? PromisifiedStream<T, U>
     : C[prop] extends OriginalUnaryCall<infer T, infer U>
     ? PromisifiedUnaryCall<T, U>
@@ -135,13 +151,34 @@ export const getServer = (): grpc.Server => {
 };
 
 export const getSSLClient = (address: string, options?: Partial<grpc.ClientOptions>): HubServiceClient => {
+  if (!address) throw new Error("Hub address not specified");
   return new HubServiceClient(address, grpc.credentials.createSsl(), { ...options });
 };
 
 export const getInsecureClient = (address: string, options?: Partial<grpc.ClientOptions>): HubServiceClient => {
+  if (!address) throw new Error("Hub address not specified");
   return new HubServiceClient(address, grpc.credentials.createInsecure(), { ...options });
 };
 
 export const getAdminClient = (address: string, options?: Partial<grpc.ClientOptions>): AdminServiceClient => {
+  if (!address) throw new Error("Hub address not specified");
   return new AdminServiceClient(address, grpc.credentials.createInsecure(), { ...options });
 };
+
+export function createDefaultMetadataKeyInterceptor(key: string, value: string) {
+  return function metadataKeyInterceptor(options: grpc.InterceptorOptions, nextCall: grpc.NextCall) {
+    const requester = {
+      start: function (
+        metadata: grpc.Metadata,
+        listener: grpc.Listener,
+        next: (metadata: grpc.Metadata, listener: grpc.Listener) => void,
+      ) {
+        if (metadata.get(key).length === 0) {
+          metadata.set(key, value);
+        }
+        next(metadata, listener);
+      },
+    };
+    return new grpc.InterceptingCall(nextCall(options), requester);
+  };
+}

@@ -1,15 +1,16 @@
 use super::{
-    hub_error_to_js_throw, make_cast_id_key, make_fid_key, make_user_key, message,
+    deferred_settle_messages, hub_error_to_js_throw, make_cast_id_key, make_fid_key, make_user_key,
+    message,
     store::{Store, StoreDef},
-    utils::{encode_messages_to_js_object, get_page_options, get_store},
-    HubError, MessagesPage, PageOptions, RootPrefix, StoreEventHandler, UserPostfix, PAGE_SIZE_MAX,
-    TS_HASH_LENGTH,
+    utils::{get_page_options, get_store},
+    HubError, IntoU8, MessagesPage, PageOptions, RootPrefix, StoreEventHandler, UserPostfix,
+    PAGE_SIZE_MAX, TS_HASH_LENGTH,
 };
-use crate::protos::message_data;
 use crate::{
     db::{RocksDB, RocksDbTransactionBatch},
     protos::{self, reaction_body::Target, Message, MessageType, ReactionBody, ReactionType},
 };
+use crate::{protos::message_data, THREAD_POOL};
 use neon::{
     context::{Context, FunctionContext},
     result::JsResult,
@@ -24,11 +25,11 @@ pub struct ReactionStoreDef {
 
 impl StoreDef for ReactionStoreDef {
     fn postfix(&self) -> u8 {
-        UserPostfix::ReactionMessage as u8
+        UserPostfix::ReactionMessage.as_u8()
     }
 
     fn add_message_type(&self) -> u8 {
-        MessageType::ReactionAdd as u8
+        MessageType::ReactionAdd.into_u8()
     }
 
     fn remove_message_type(&self) -> u8 {
@@ -49,23 +50,15 @@ impl StoreDef for ReactionStoreDef {
             && message.data.as_ref().unwrap().body.is_some()
     }
 
-    fn find_merge_add_conflicts(
-        &self,
-        _message: &protos::Message,
-    ) -> Result<(), super::store::HubError> {
-        // For reactions, there will be no conflicts
-        Ok(())
+    fn compact_state_message_type(&self) -> u8 {
+        MessageType::None as u8
     }
 
-    fn find_merge_remove_conflicts(
-        &self,
-        _message: &protos::Message,
-    ) -> Result<(), super::store::HubError> {
-        // For reactions, there will be no conflicts
-        Ok(())
+    fn is_compact_state_type(&self, _message: &Message) -> bool {
+        false
     }
 
-    fn build_secondary_indicies(
+    fn build_secondary_indices(
         &self,
         txn: &mut RocksDbTransactionBatch,
         ts_hash: &[u8; TS_HASH_LENGTH],
@@ -78,7 +71,7 @@ impl StoreDef for ReactionStoreDef {
         Ok(())
     }
 
-    fn delete_secondary_indicies(
+    fn delete_secondary_indices(
         &self,
         txn: &mut RocksDbTransactionBatch,
         ts_hash: &[u8; TS_HASH_LENGTH],
@@ -88,6 +81,32 @@ impl StoreDef for ReactionStoreDef {
 
         txn.delete(by_target_key);
 
+        Ok(())
+    }
+
+    fn delete_remove_secondary_indices(
+        &self,
+        _txn: &mut RocksDbTransactionBatch,
+        _message: &Message,
+    ) -> Result<(), HubError> {
+        Ok(())
+    }
+
+    fn find_merge_add_conflicts(
+        &self,
+        _db: &RocksDB,
+        _message: &protos::Message,
+    ) -> Result<(), HubError> {
+        // For reactions, there will be no conflicts
+        Ok(())
+    }
+
+    fn find_merge_remove_conflicts(
+        &self,
+        _db: &RocksDB,
+        _message: &Message,
+    ) -> Result<(), HubError> {
+        // For reactions, there will be no conflicts
         Ok(())
     }
 
@@ -125,6 +144,20 @@ impl StoreDef for ReactionStoreDef {
             reaction_body.r#type,
             reaction_body.target.as_ref(),
         )
+    }
+
+    fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, HubError> {
+        Err(HubError {
+            code: "bad_request.invalid_param".to_string(),
+            message: "Reaction Store doesn't support compact state".to_string(),
+        })
+    }
+
+    fn make_compact_state_prefix(&self, _fid: u32) -> Result<Vec<u8>, HubError> {
+        Err(HubError {
+            code: "bad_request.invalid_param".to_string(),
+            message: "Reaction Store doesn't support compact state".to_string(),
+        })
     }
 
     fn get_prune_size_limit(&self) -> u32 {
@@ -452,17 +485,14 @@ impl ReactionStore {
         let reaction_type = cx.argument::<JsNumber>(1).unwrap().value(&mut cx) as i32;
 
         let page_options = get_page_options(&mut cx, 2)?;
-
-        let messages =
-            match Self::get_reaction_adds_by_fid(&store, fid, reaction_type, &page_options) {
-                Ok(messages) => messages,
-                Err(e) => return hub_error_to_js_throw(&mut cx, e),
-            };
-
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        deferred.settle_with(&channel, move |mut cx| {
-            encode_messages_to_js_object(&mut cx, messages)
+
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let messages =
+                ReactionStore::get_reaction_adds_by_fid(&store, fid, reaction_type, &page_options);
+
+            deferred_settle_messages(deferred, &channel, messages);
         });
 
         Ok(promise)
@@ -498,21 +528,18 @@ impl ReactionStore {
         let reaction_type = cx.argument::<JsNumber>(1).unwrap().value(&mut cx) as i32;
 
         let page_options = get_page_options(&mut cx, 2)?;
-
-        let messages = match ReactionStore::get_reaction_removes_by_fid(
-            &store,
-            fid,
-            reaction_type,
-            &page_options,
-        ) {
-            Ok(messages) => messages,
-            Err(e) => return hub_error_to_js_throw(&mut cx, e),
-        };
-
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        deferred.settle_with(&channel, move |mut cx| {
-            encode_messages_to_js_object(&mut cx, messages)
+
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let messages = ReactionStore::get_reaction_removes_by_fid(
+                &store,
+                fid,
+                reaction_type,
+                &page_options,
+            );
+
+            deferred_settle_messages(deferred, &channel, messages);
         });
 
         Ok(promise)
@@ -525,7 +552,6 @@ impl ReactionStore {
         page_options: &PageOptions,
     ) -> Result<MessagesPage, HubError> {
         let prefix = ReactionStoreDef::make_reactions_by_target_key(target, 0, None);
-        // println!("prefix: {:?}", prefix);
 
         let mut message_keys = vec![];
         let mut last_key = vec![];
@@ -533,8 +559,6 @@ impl ReactionStore {
         store
             .db()
             .for_each_iterator_by_prefix(&prefix, page_options, |key, value| {
-                // println!("key: {:x?}, value: {:x?}", key, value);
-
                 if reaction_type == ReactionType::None as i32
                     || (value.len() == 1 && value[0] == reaction_type as u8)
                 {
@@ -562,7 +586,8 @@ impl ReactionStore {
                 Ok(false) // Continue iterating
             })?;
 
-        let messages = message::get_many_messages(store.db().borrow(), message_keys)?;
+        let messages_bytes =
+            message::get_many_messages_as_bytes(store.db().borrow(), message_keys)?;
         let next_page_token = if last_key.len() > 0 {
             Some(last_key[prefix.len()..].to_vec())
         } else {
@@ -570,7 +595,7 @@ impl ReactionStore {
         };
 
         Ok(MessagesPage {
-            messages,
+            messages_bytes,
             next_page_token,
         })
     }
@@ -608,20 +633,18 @@ impl ReactionStore {
 
         let page_options = get_page_options(&mut cx, 3)?;
 
-        let messages = match ReactionStore::get_reactions_by_target(
-            &store,
-            &target,
-            reaction_type,
-            &page_options,
-        ) {
-            Ok(messages) => messages,
-            Err(e) => return hub_error_to_js_throw(&mut cx, e),
-        };
-
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        deferred.settle_with(&channel, move |mut cx| {
-            encode_messages_to_js_object(&mut cx, messages)
+
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let messages = ReactionStore::get_reactions_by_target(
+                &store,
+                &target,
+                reaction_type,
+                &page_options,
+            );
+
+            deferred_settle_messages(deferred, &channel, messages);
         });
 
         Ok(promise)

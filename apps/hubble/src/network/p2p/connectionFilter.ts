@@ -1,5 +1,4 @@
-import { ConnectionGater, MultiaddrConnection } from "@libp2p/interface-connection";
-import { PeerId } from "@libp2p/interface-peer-id";
+import { ConnectionGater, MultiaddrConnection, PeerId } from "@libp2p/interface";
 import { Multiaddr } from "@multiformats/multiaddr";
 import { logger } from "../../utils/logger.js";
 
@@ -21,9 +20,9 @@ export class ConnectionFilter implements ConnectionGater {
   private allowedPeers: string[] | undefined;
   private deniedPeers: string[];
 
-  constructor(addrs: string[] | undefined, deiniedPeers: string[] | undefined) {
+  constructor(addrs: string[] | undefined, deniedPeers: string[] | undefined) {
     this.allowedPeers = addrs;
-    this.deniedPeers = deiniedPeers ?? [];
+    this.deniedPeers = deniedPeers ?? [];
   }
 
   updateAllowedPeers(addrs: string[] | undefined) {
@@ -34,6 +33,10 @@ export class ConnectionFilter implements ConnectionGater {
     this.deniedPeers = addrs;
   }
 
+  addDeniedPeer(peerId: string) {
+    this.deniedPeers.push(peerId);
+  }
+
   denyDialPeer = async (peerId: PeerId): Promise<boolean> => {
     const deny = this.shouldDeny(peerId.toString());
     if (deny) {
@@ -42,7 +45,12 @@ export class ConnectionFilter implements ConnectionGater {
     return deny;
   };
 
-  denyDialMultiaddr = async (peerId: PeerId, _multiaddr: Multiaddr): Promise<boolean> => {
+  denyDialMultiaddr = async (_multiaddr: Multiaddr): Promise<boolean> => {
+    const peerId = _multiaddr.getPeerId();
+    if (!peerId) {
+      return true;
+    }
+
     const deny = this.shouldDeny(peerId.toString());
     if (deny) {
       log.info({ peerId, filter: "denyDialMultiaddr" }, "denied a connection");

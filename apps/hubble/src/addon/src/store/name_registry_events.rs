@@ -5,19 +5,20 @@ use crate::{
     protos::UserNameProof,
 };
 
-use super::{HubError, RootPrefix};
+use super::{make_fid_key, HubError, RootPrefix};
 
 pub fn make_fname_username_proof_key(name: &[u8]) -> Vec<u8> {
-    let mut key = Vec::with_capacity(1 + 32 + 1 + 32);
+    let mut key = Vec::with_capacity(1 + 32);
     key.push(RootPrefix::FNameUserNameProof as u8);
     key.extend_from_slice(name);
     key
 }
 
 pub fn make_fname_username_proof_by_fid_key(fid: u32) -> Vec<u8> {
-    let mut key = Vec::with_capacity(1 + 4 + 1 + 32);
+    let mut key = Vec::with_capacity(1 + 4);
+
     key.push(RootPrefix::FNameUserNameProofByFid as u8);
-    key.extend_from_slice(&fid.to_le_bytes());
+    key.extend_from_slice(&make_fid_key(fid));
     key
 }
 
@@ -74,10 +75,15 @@ pub fn put_username_proof_transaction(
 pub fn delete_username_proof_transaction(
     txn: &mut RocksDbTransactionBatch,
     username_proof: &UserNameProof,
+    existing_fid: Option<u32>,
 ) {
-    let primary_key = make_fname_username_proof_key(&username_proof.name);
-    txn.delete(primary_key);
+    let buf = username_proof.encode_to_vec();
 
-    let secondary_key = make_fname_username_proof_by_fid_key(username_proof.fid as u32);
-    txn.delete(secondary_key);
+    let primary_key = make_fname_username_proof_key(&username_proof.name);
+    txn.put(primary_key.clone(), buf);
+
+    if existing_fid.is_some() {
+        let secondary_key = make_fname_username_proof_by_fid_key(existing_fid.unwrap());
+        txn.delete(secondary_key);
+    }
 }

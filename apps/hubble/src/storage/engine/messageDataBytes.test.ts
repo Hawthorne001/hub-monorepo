@@ -8,10 +8,17 @@ import {
   bytesCompare,
   bytesDecrement,
 } from "@farcaster/hub-nodejs";
-import { ensureMessageData, messageDecode, messageEncode } from "../db/message.js";
+import {
+  ensureMessageData,
+  makeMessagePrimaryKeyFromMessage,
+  makeUserKey,
+  messageDecode,
+  messageEncode,
+} from "../db/message.js";
 import { jestRocksDB } from "../db/jestUtils.js";
 import Engine from "./index.js";
 import { blake3Truncate160 } from "../../utils/crypto.js";
+import { UserPostfix } from "../db/types.js";
 
 const db = jestRocksDB("protobufs.messageDataBytes.test");
 const network = FarcasterNetwork.TESTNET;
@@ -91,9 +98,20 @@ describe("messageDataBytes", () => {
       const result = await engine.mergeMessage(ensureMessageData(castAddClone));
       expect(result.isOk()).toBeTruthy();
 
+      // Make sure that in the DB, the data field is erased, and only data bytes exist
+      const castAddKey = makeMessagePrimaryKeyFromMessage(castAddClone);
+      const castAddBytes = await db.get(castAddKey);
+      expect(castAddBytes).toBeDefined();
+
+      const castAddDecoded = Message.decode(castAddBytes);
+      expect(castAddDecoded.data).toBeUndefined();
+      expect(bytesCompare(castAddDecoded.dataBytes as Uint8Array, castAddClone.dataBytes as Uint8Array)).toEqual(0);
+
+      // Then, get it via the engine. The castAdd should be fetched correctly and the data body should be populated
       const fetched = await engine.getCast(fid, castAdd.hash);
 
       expect(fetched.isOk()).toBeTruthy();
+      expect(fetched._unsafeUnwrap()).toBeDefined();
       expect(MessageData.toJSON(fetched._unsafeUnwrap().data)).toEqual(MessageData.toJSON(castAdd.data));
     });
 
@@ -141,13 +159,13 @@ describe("messageDataBytes", () => {
       expect(result3._unsafeUnwrapErr().message).toContain("invalid hash");
     });
 
-    test("fails if dataBytes is > 1024 bytes", async () => {
+    test("fails if dataBytes is > 2048 bytes", async () => {
       const castAddClone = cloneMessage(castAdd);
-      castAddClone.dataBytes = new Uint8Array(1025);
+      castAddClone.dataBytes = new Uint8Array(2049);
 
       const result = await engine.mergeMessage(castAddClone);
       expect(result.isErr()).toBeTruthy();
-      expect(result._unsafeUnwrapErr().message).toContain("dataBytes > 1024 bytes");
+      expect(result._unsafeUnwrapErr().message).toContain("dataBytes > 2048 bytes");
     });
 
     // This function re-encodes the fid with a different varint encoding, simulating what

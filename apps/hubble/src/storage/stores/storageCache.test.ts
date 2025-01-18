@@ -1,10 +1,18 @@
 import { ok } from "neverthrow";
-import { Factories, HubEvent, HubEventType, getFarcasterTime } from "@farcaster/hub-nodejs";
+import {
+  Factories,
+  HubEvent,
+  HubEventType,
+  getFarcasterTime,
+  LEGACY_STORAGE_UNIT_CUTOFF_TIMESTAMP,
+} from "@farcaster/hub-nodejs";
 import { jestRocksDB } from "../db/jestUtils.js";
 import { makeTsHash, putMessage } from "../db/message.js";
 import { UserPostfix } from "../db/types.js";
 import { StorageCache } from "./storageCache.js";
 import { putOnChainEventTransaction } from "../db/onChainEvent.js";
+import { sleep } from "../../utils/crypto.js";
+import { jest } from "@jest/globals";
 
 const db = jestRocksDB("engine.storageCache.test");
 
@@ -50,8 +58,8 @@ describe("syncFromDb", () => {
       for (let i = 0; i < fidUsage.usage.storage; i++) {
         const storageRentEvent = Factories.StorageRentOnChainEvent.build({
           fid: fidUsage.fid,
+          blockTimestamp: Date.now() / 1000,
           storageRentEventBody: Factories.StorageRentEventBody.build({
-            expiry: getFarcasterTime()._unsafeUnwrap() + 365 * 24 * 60 * 60 - i,
             units: 2,
           }),
         });
@@ -72,28 +80,79 @@ describe("syncFromDb", () => {
       await expect(cache.getMessageCount(fidUsage.fid, UserPostfix.UserDataMessage)).resolves.toEqual(
         ok(fidUsage.usage.userData),
       );
-      await expect(cache.getCurrentStorageUnitsForFid(fidUsage.fid)).resolves.toEqual(ok(4));
+      const slot = (await cache.getCurrentStorageSlotForFid(fidUsage.fid))._unsafeUnwrap();
+      expect(slot.units).toEqual(4);
+      expect(slot.legacy_units).toEqual(0);
     }
   });
 });
 
 describe("getCurrentStorageUnitsForFid", () => {
+  beforeEach(async () => {
+    jest.useFakeTimers();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
   test("cache invalidation happens when expected", async () => {
     const fid = Factories.Fid.build();
-    for (let i = 1; i < 3; i++) {
-      const event = Factories.StorageRentOnChainEvent.build({
-        fid: fid,
-        storageRentEventBody: Factories.StorageRentEventBody.build({
-          expiry: getFarcasterTime()._unsafeUnwrap() + i,
-          units: 2,
-        }),
-      });
-      await db.commit(putOnChainEventTransaction(db.transaction(), event));
-    }
+    const ONE_YEAR = 1000 * 60 * 60 * 24 * 365;
+    // 2 years and 2 seconds before the cutoff
+    jest.setSystemTime((LEGACY_STORAGE_UNIT_CUTOFF_TIMESTAMP - 2) * 1000 - ONE_YEAR * 2);
+    // Unit rented on Aug 2022, expires Aug 2024 (2 years)
+    let event = Factories.StorageRentOnChainEvent.build({
+      fid: fid,
+      blockTimestamp: Math.floor(Date.now() / 1000) + 1,
+      storageRentEventBody: Factories.StorageRentEventBody.build({
+        units: 1,
+      }),
+    });
+    await db.commit(putOnChainEventTransaction(db.transaction(), event));
+
+    jest.advanceTimersByTime(ONE_YEAR);
+    // Unit rented on Aug 2023, expires Aug 2025 (2 years)
+    event = Factories.StorageRentOnChainEvent.build({
+      fid: fid,
+      blockTimestamp: Math.floor(Date.now() / 1000) + 1,
+      storageRentEventBody: Factories.StorageRentEventBody.build({
+        units: 2,
+      }),
+    });
+    await db.commit(putOnChainEventTransaction(db.transaction(), event));
+
+    // Unit rented on Aug 2024 after the cutoff, expires Aug 2025 (1 year)
+    jest.advanceTimersByTime(ONE_YEAR);
+    event = Factories.StorageRentOnChainEvent.build({
+      fid: fid,
+      blockTimestamp: Math.floor(Date.now() / 1000) + 3, // 3s after the cutoff
+      storageRentEventBody: Factories.StorageRentEventBody.build({
+        units: 2,
+      }),
+    });
+    await db.commit(putOnChainEventTransaction(db.transaction(), event));
+
+    jest.advanceTimersByTime(ONE_YEAR);
+    // The first unit should be expired at this point
     await cache.syncFromDb();
-    await expect(cache.getCurrentStorageUnitsForFid(fid)).resolves.toEqual(ok(4));
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    await expect(cache.getCurrentStorageUnitsForFid(fid)).resolves.toEqual(ok(2));
+
+    let slot = (await cache.getCurrentStorageSlotForFid(fid))._unsafeUnwrap();
+    // 2nd and 3rd units are still valid
+    expect(slot.legacy_units).toEqual(2);
+    expect(slot.units).toEqual(2);
+
+    jest.advanceTimersByTime(2000);
+
+    slot = (await cache.getCurrentStorageSlotForFid(fid))._unsafeUnwrap();
+    // 2nd unit is expired
+    expect(slot.legacy_units).toEqual(0);
+    expect(slot.units).toEqual(2);
+
+    jest.advanceTimersByTime(2000);
+
+    slot = (await cache.getCurrentStorageSlotForFid(fid))._unsafeUnwrap();
+    // All units expired
+    expect(slot.legacy_units).toEqual(0);
+    expect(slot.units).toEqual(0);
   });
 });
 
@@ -111,6 +170,32 @@ describe("getMessageCount", () => {
       ok(1),
     );
     await expect(cache.getMessageCount(Factories.Fid.build(), UserPostfix.CastMessage)).resolves.toEqual(ok(0));
+  });
+
+  test("count is correct even if called multiple times at once", async () => {
+    const fid = Factories.Fid.build();
+    const message = await Factories.CastAddMessage.create({ data: { fid } });
+    await putMessage(db, message);
+
+    const origDbCountKeysAtPrefix = db.countKeysAtPrefix;
+    try {
+      let callCount = 0;
+      db.countKeysAtPrefix = async (prefix: Buffer): Promise<number> => {
+        callCount++;
+        await sleep(1000);
+        return origDbCountKeysAtPrefix.call(db, prefix);
+      };
+
+      // Call the function multiple 110 times at once
+      const promises = await Promise.all(
+        Array.from({ length: 110 }, () => cache.getMessageCount(fid, UserPostfix.CastMessage)),
+      );
+      expect(promises.length).toEqual(110);
+      expect(callCount).toEqual(1);
+      promises.forEach((promise) => expect(promise).toEqual(ok(1)));
+    } finally {
+      db.countKeysAtPrefix = origDbCountKeysAtPrefix;
+    }
   });
 });
 
@@ -264,13 +349,13 @@ describe("processEvent", () => {
       makeTsHash(firstMessage.data.timestamp, firstMessage.hash),
     );
 
-    cache.processEvent(laterEvent);
+    await cache.processEvent(laterEvent);
     // Unchanged
     await expect(cache.getEarliestTsHash(fid, UserPostfix.ReactionMessage)).resolves.toEqual(
       makeTsHash(firstMessage.data.timestamp, firstMessage.hash),
     );
 
-    cache.processEvent(firstEvent);
+    await cache.processEvent(firstEvent);
     // Unset
     await expect(cache.getEarliestTsHash(fid, UserPostfix.ReactionMessage)).resolves.toEqual(ok(undefined));
   });

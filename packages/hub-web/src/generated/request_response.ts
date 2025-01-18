@@ -75,12 +75,43 @@ export function storeTypeToJSON(object: StoreType): string {
   }
 }
 
+export enum StorageUnitType {
+  UNIT_TYPE_LEGACY = 0,
+  UNIT_TYPE_2024 = 1,
+}
+
+export function storageUnitTypeFromJSON(object: any): StorageUnitType {
+  switch (object) {
+    case 0:
+    case "UNIT_TYPE_LEGACY":
+      return StorageUnitType.UNIT_TYPE_LEGACY;
+    case 1:
+    case "UNIT_TYPE_2024":
+      return StorageUnitType.UNIT_TYPE_2024;
+    default:
+      throw new tsProtoGlobalThis.Error("Unrecognized enum value " + object + " for enum StorageUnitType");
+  }
+}
+
+export function storageUnitTypeToJSON(object: StorageUnitType): string {
+  switch (object) {
+    case StorageUnitType.UNIT_TYPE_LEGACY:
+      return "UNIT_TYPE_LEGACY";
+    case StorageUnitType.UNIT_TYPE_2024:
+      return "UNIT_TYPE_2024";
+    default:
+      throw new tsProtoGlobalThis.Error("Unrecognized enum value " + object + " for enum StorageUnitType");
+  }
+}
+
 export interface Empty {
 }
 
 export interface SubscribeRequest {
   eventTypes: HubEventType[];
   fromId?: number | undefined;
+  totalShards?: number | undefined;
+  shardIndex?: number | undefined;
 }
 
 export interface EventRequest {
@@ -106,6 +137,7 @@ export interface DbStats {
   numMessages: number;
   numFidEvents: number;
   numFnameEvents: number;
+  approxSize: number;
 }
 
 export interface SyncStatusRequest {
@@ -157,6 +189,15 @@ export interface FidRequest {
   pageSize?: number | undefined;
   pageToken?: Uint8Array | undefined;
   reverse?: boolean | undefined;
+}
+
+export interface FidTimestampRequest {
+  fid: number;
+  pageSize?: number | undefined;
+  pageToken?: Uint8Array | undefined;
+  reverse?: boolean | undefined;
+  startTimestamp?: number | undefined;
+  stopTimestamp?: number | undefined;
 }
 
 export interface FidsRequest {
@@ -236,6 +277,12 @@ export interface OnChainEventResponse {
 export interface StorageLimitsResponse {
   limits: StorageLimit[];
   units: number;
+  unitDetails: StorageUnitDetails[];
+}
+
+export interface StorageUnitDetails {
+  unitType: StorageUnitType;
+  unitSize: number;
 }
 
 export interface StorageLimit {
@@ -300,6 +347,75 @@ export interface ValidationResponse {
   message: Message | undefined;
 }
 
+export interface SubmitBulkMessagesRequest {
+  messages: Message[];
+}
+
+export interface MessageError {
+  hash: Uint8Array;
+  errCode: string;
+  message: string;
+}
+
+export interface BulkMessageResponse {
+  message?: Message | undefined;
+  messageError?: MessageError | undefined;
+}
+
+export interface SubmitBulkMessagesResponse {
+  messages: BulkMessageResponse[];
+}
+
+export interface StreamSyncRequest {
+  getInfo?: HubInfoRequest | undefined;
+  getCurrentPeers?: Empty | undefined;
+  stopSync?: Empty | undefined;
+  forceSync?: SyncStatusRequest | undefined;
+  getSyncStatus?: SyncStatusRequest | undefined;
+  getAllSyncIdsByPrefix?: TrieNodePrefix | undefined;
+  getAllMessagesBySyncIds?: SyncIds | undefined;
+  getSyncMetadataByPrefix?: TrieNodePrefix | undefined;
+  getSyncSnapshotByPrefix?: TrieNodePrefix | undefined;
+  getOnChainEvents?: OnChainEventRequest | undefined;
+  getOnChainSignersByFid?: FidRequest | undefined;
+}
+
+export interface StreamError {
+  errCode: string;
+  message: string;
+  request: string;
+}
+
+export interface StreamSyncResponse {
+  getInfo?: HubInfoResponse | undefined;
+  getCurrentPeers?: ContactInfoResponse | undefined;
+  stopSync?: SyncStatusResponse | undefined;
+  forceSync?: SyncStatusResponse | undefined;
+  getSyncStatus?: SyncStatusResponse | undefined;
+  getAllSyncIdsByPrefix?: SyncIds | undefined;
+  getAllMessagesBySyncIds?: MessagesResponse | undefined;
+  getSyncMetadataByPrefix?: TrieNodeMetadataResponse | undefined;
+  getSyncSnapshotByPrefix?: TrieNodeSnapshotResponse | undefined;
+  getOnChainEvents?: OnChainEventResponse | undefined;
+  getOnChainSignersByFid?: OnChainEventResponse | undefined;
+  error?: StreamError | undefined;
+}
+
+export interface StreamFetchRequest {
+  idempotencyKey: string;
+  castMessagesByFid?: FidTimestampRequest | undefined;
+  reactionMessagesByFid?: FidTimestampRequest | undefined;
+  verificationMessagesByFid?: FidTimestampRequest | undefined;
+  userDataMessagesByFid?: FidTimestampRequest | undefined;
+  linkMessagesByFid?: FidTimestampRequest | undefined;
+}
+
+export interface StreamFetchResponse {
+  idempotencyKey: string;
+  messages?: MessagesResponse | undefined;
+  error?: StreamError | undefined;
+}
+
 function createBaseEmpty(): Empty {
   return {};
 }
@@ -345,7 +461,7 @@ export const Empty = {
 };
 
 function createBaseSubscribeRequest(): SubscribeRequest {
-  return { eventTypes: [], fromId: undefined };
+  return { eventTypes: [], fromId: undefined, totalShards: undefined, shardIndex: undefined };
 }
 
 export const SubscribeRequest = {
@@ -357,6 +473,12 @@ export const SubscribeRequest = {
     writer.ldelim();
     if (message.fromId !== undefined) {
       writer.uint32(16).uint64(message.fromId);
+    }
+    if (message.totalShards !== undefined) {
+      writer.uint32(24).uint64(message.totalShards);
+    }
+    if (message.shardIndex !== undefined) {
+      writer.uint32(32).uint64(message.shardIndex);
     }
     return writer;
   },
@@ -391,6 +513,20 @@ export const SubscribeRequest = {
 
           message.fromId = longToNumber(reader.uint64() as Long);
           continue;
+        case 3:
+          if (tag != 24) {
+            break;
+          }
+
+          message.totalShards = longToNumber(reader.uint64() as Long);
+          continue;
+        case 4:
+          if (tag != 32) {
+            break;
+          }
+
+          message.shardIndex = longToNumber(reader.uint64() as Long);
+          continue;
       }
       if ((tag & 7) == 4 || tag == 0) {
         break;
@@ -404,6 +540,8 @@ export const SubscribeRequest = {
     return {
       eventTypes: Array.isArray(object?.eventTypes) ? object.eventTypes.map((e: any) => hubEventTypeFromJSON(e)) : [],
       fromId: isSet(object.fromId) ? Number(object.fromId) : undefined,
+      totalShards: isSet(object.totalShards) ? Number(object.totalShards) : undefined,
+      shardIndex: isSet(object.shardIndex) ? Number(object.shardIndex) : undefined,
     };
   },
 
@@ -415,6 +553,8 @@ export const SubscribeRequest = {
       obj.eventTypes = [];
     }
     message.fromId !== undefined && (obj.fromId = Math.round(message.fromId));
+    message.totalShards !== undefined && (obj.totalShards = Math.round(message.totalShards));
+    message.shardIndex !== undefined && (obj.shardIndex = Math.round(message.shardIndex));
     return obj;
   },
 
@@ -426,6 +566,8 @@ export const SubscribeRequest = {
     const message = createBaseSubscribeRequest();
     message.eventTypes = object.eventTypes?.map((e) => e) || [];
     message.fromId = object.fromId ?? undefined;
+    message.totalShards = object.totalShards ?? undefined;
+    message.shardIndex = object.shardIndex ?? undefined;
     return message;
   },
 };
@@ -689,7 +831,7 @@ export const HubInfoResponse = {
 };
 
 function createBaseDbStats(): DbStats {
-  return { numMessages: 0, numFidEvents: 0, numFnameEvents: 0 };
+  return { numMessages: 0, numFidEvents: 0, numFnameEvents: 0, approxSize: 0 };
 }
 
 export const DbStats = {
@@ -702,6 +844,9 @@ export const DbStats = {
     }
     if (message.numFnameEvents !== 0) {
       writer.uint32(24).uint64(message.numFnameEvents);
+    }
+    if (message.approxSize !== 0) {
+      writer.uint32(32).uint64(message.approxSize);
     }
     return writer;
   },
@@ -734,6 +879,13 @@ export const DbStats = {
 
           message.numFnameEvents = longToNumber(reader.uint64() as Long);
           continue;
+        case 4:
+          if (tag != 32) {
+            break;
+          }
+
+          message.approxSize = longToNumber(reader.uint64() as Long);
+          continue;
       }
       if ((tag & 7) == 4 || tag == 0) {
         break;
@@ -748,6 +900,7 @@ export const DbStats = {
       numMessages: isSet(object.numMessages) ? Number(object.numMessages) : 0,
       numFidEvents: isSet(object.numFidEvents) ? Number(object.numFidEvents) : 0,
       numFnameEvents: isSet(object.numFnameEvents) ? Number(object.numFnameEvents) : 0,
+      approxSize: isSet(object.approxSize) ? Number(object.approxSize) : 0,
     };
   },
 
@@ -756,6 +909,7 @@ export const DbStats = {
     message.numMessages !== undefined && (obj.numMessages = Math.round(message.numMessages));
     message.numFidEvents !== undefined && (obj.numFidEvents = Math.round(message.numFidEvents));
     message.numFnameEvents !== undefined && (obj.numFnameEvents = Math.round(message.numFnameEvents));
+    message.approxSize !== undefined && (obj.approxSize = Math.round(message.approxSize));
     return obj;
   },
 
@@ -768,6 +922,7 @@ export const DbStats = {
     message.numMessages = object.numMessages ?? 0;
     message.numFidEvents = object.numFidEvents ?? 0;
     message.numFnameEvents = object.numFnameEvents ?? 0;
+    message.approxSize = object.approxSize ?? 0;
     return message;
   },
 };
@@ -1505,6 +1660,137 @@ export const FidRequest = {
     message.pageSize = object.pageSize ?? undefined;
     message.pageToken = object.pageToken ?? undefined;
     message.reverse = object.reverse ?? undefined;
+    return message;
+  },
+};
+
+function createBaseFidTimestampRequest(): FidTimestampRequest {
+  return {
+    fid: 0,
+    pageSize: undefined,
+    pageToken: undefined,
+    reverse: undefined,
+    startTimestamp: undefined,
+    stopTimestamp: undefined,
+  };
+}
+
+export const FidTimestampRequest = {
+  encode(message: FidTimestampRequest, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    if (message.fid !== 0) {
+      writer.uint32(8).uint64(message.fid);
+    }
+    if (message.pageSize !== undefined) {
+      writer.uint32(16).uint32(message.pageSize);
+    }
+    if (message.pageToken !== undefined) {
+      writer.uint32(26).bytes(message.pageToken);
+    }
+    if (message.reverse !== undefined) {
+      writer.uint32(32).bool(message.reverse);
+    }
+    if (message.startTimestamp !== undefined) {
+      writer.uint32(40).uint64(message.startTimestamp);
+    }
+    if (message.stopTimestamp !== undefined) {
+      writer.uint32(48).uint64(message.stopTimestamp);
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): FidTimestampRequest {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseFidTimestampRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag != 8) {
+            break;
+          }
+
+          message.fid = longToNumber(reader.uint64() as Long);
+          continue;
+        case 2:
+          if (tag != 16) {
+            break;
+          }
+
+          message.pageSize = reader.uint32();
+          continue;
+        case 3:
+          if (tag != 26) {
+            break;
+          }
+
+          message.pageToken = reader.bytes();
+          continue;
+        case 4:
+          if (tag != 32) {
+            break;
+          }
+
+          message.reverse = reader.bool();
+          continue;
+        case 5:
+          if (tag != 40) {
+            break;
+          }
+
+          message.startTimestamp = longToNumber(reader.uint64() as Long);
+          continue;
+        case 6:
+          if (tag != 48) {
+            break;
+          }
+
+          message.stopTimestamp = longToNumber(reader.uint64() as Long);
+          continue;
+      }
+      if ((tag & 7) == 4 || tag == 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): FidTimestampRequest {
+    return {
+      fid: isSet(object.fid) ? Number(object.fid) : 0,
+      pageSize: isSet(object.pageSize) ? Number(object.pageSize) : undefined,
+      pageToken: isSet(object.pageToken) ? bytesFromBase64(object.pageToken) : undefined,
+      reverse: isSet(object.reverse) ? Boolean(object.reverse) : undefined,
+      startTimestamp: isSet(object.startTimestamp) ? Number(object.startTimestamp) : undefined,
+      stopTimestamp: isSet(object.stopTimestamp) ? Number(object.stopTimestamp) : undefined,
+    };
+  },
+
+  toJSON(message: FidTimestampRequest): unknown {
+    const obj: any = {};
+    message.fid !== undefined && (obj.fid = Math.round(message.fid));
+    message.pageSize !== undefined && (obj.pageSize = Math.round(message.pageSize));
+    message.pageToken !== undefined &&
+      (obj.pageToken = message.pageToken !== undefined ? base64FromBytes(message.pageToken) : undefined);
+    message.reverse !== undefined && (obj.reverse = message.reverse);
+    message.startTimestamp !== undefined && (obj.startTimestamp = Math.round(message.startTimestamp));
+    message.stopTimestamp !== undefined && (obj.stopTimestamp = Math.round(message.stopTimestamp));
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<FidTimestampRequest>, I>>(base?: I): FidTimestampRequest {
+    return FidTimestampRequest.fromPartial(base ?? {});
+  },
+
+  fromPartial<I extends Exact<DeepPartial<FidTimestampRequest>, I>>(object: I): FidTimestampRequest {
+    const message = createBaseFidTimestampRequest();
+    message.fid = object.fid ?? 0;
+    message.pageSize = object.pageSize ?? undefined;
+    message.pageToken = object.pageToken ?? undefined;
+    message.reverse = object.reverse ?? undefined;
+    message.startTimestamp = object.startTimestamp ?? undefined;
+    message.stopTimestamp = object.stopTimestamp ?? undefined;
     return message;
   },
 };
@@ -2596,7 +2882,7 @@ export const OnChainEventResponse = {
 };
 
 function createBaseStorageLimitsResponse(): StorageLimitsResponse {
-  return { limits: [], units: 0 };
+  return { limits: [], units: 0, unitDetails: [] };
 }
 
 export const StorageLimitsResponse = {
@@ -2606,6 +2892,9 @@ export const StorageLimitsResponse = {
     }
     if (message.units !== 0) {
       writer.uint32(16).uint32(message.units);
+    }
+    for (const v of message.unitDetails) {
+      StorageUnitDetails.encode(v!, writer.uint32(26).fork()).ldelim();
     }
     return writer;
   },
@@ -2631,6 +2920,13 @@ export const StorageLimitsResponse = {
 
           message.units = reader.uint32();
           continue;
+        case 3:
+          if (tag != 26) {
+            break;
+          }
+
+          message.unitDetails.push(StorageUnitDetails.decode(reader, reader.uint32()));
+          continue;
       }
       if ((tag & 7) == 4 || tag == 0) {
         break;
@@ -2644,6 +2940,9 @@ export const StorageLimitsResponse = {
     return {
       limits: Array.isArray(object?.limits) ? object.limits.map((e: any) => StorageLimit.fromJSON(e)) : [],
       units: isSet(object.units) ? Number(object.units) : 0,
+      unitDetails: Array.isArray(object?.unitDetails)
+        ? object.unitDetails.map((e: any) => StorageUnitDetails.fromJSON(e))
+        : [],
     };
   },
 
@@ -2655,6 +2954,11 @@ export const StorageLimitsResponse = {
       obj.limits = [];
     }
     message.units !== undefined && (obj.units = Math.round(message.units));
+    if (message.unitDetails) {
+      obj.unitDetails = message.unitDetails.map((e) => e ? StorageUnitDetails.toJSON(e) : undefined);
+    } else {
+      obj.unitDetails = [];
+    }
     return obj;
   },
 
@@ -2666,6 +2970,78 @@ export const StorageLimitsResponse = {
     const message = createBaseStorageLimitsResponse();
     message.limits = object.limits?.map((e) => StorageLimit.fromPartial(e)) || [];
     message.units = object.units ?? 0;
+    message.unitDetails = object.unitDetails?.map((e) => StorageUnitDetails.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseStorageUnitDetails(): StorageUnitDetails {
+  return { unitType: 0, unitSize: 0 };
+}
+
+export const StorageUnitDetails = {
+  encode(message: StorageUnitDetails, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    if (message.unitType !== 0) {
+      writer.uint32(8).int32(message.unitType);
+    }
+    if (message.unitSize !== 0) {
+      writer.uint32(16).uint32(message.unitSize);
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): StorageUnitDetails {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseStorageUnitDetails();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag != 8) {
+            break;
+          }
+
+          message.unitType = reader.int32() as any;
+          continue;
+        case 2:
+          if (tag != 16) {
+            break;
+          }
+
+          message.unitSize = reader.uint32();
+          continue;
+      }
+      if ((tag & 7) == 4 || tag == 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): StorageUnitDetails {
+    return {
+      unitType: isSet(object.unitType) ? storageUnitTypeFromJSON(object.unitType) : 0,
+      unitSize: isSet(object.unitSize) ? Number(object.unitSize) : 0,
+    };
+  },
+
+  toJSON(message: StorageUnitDetails): unknown {
+    const obj: any = {};
+    message.unitType !== undefined && (obj.unitType = storageUnitTypeToJSON(message.unitType));
+    message.unitSize !== undefined && (obj.unitSize = Math.round(message.unitSize));
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<StorageUnitDetails>, I>>(base?: I): StorageUnitDetails {
+    return StorageUnitDetails.fromPartial(base ?? {});
+  },
+
+  fromPartial<I extends Exact<DeepPartial<StorageUnitDetails>, I>>(object: I): StorageUnitDetails {
+    const message = createBaseStorageUnitDetails();
+    message.unitType = object.unitType ?? 0;
+    message.unitSize = object.unitSize ?? 0;
     return message;
   },
 };
@@ -3554,6 +3930,1153 @@ export const ValidationResponse = {
     message.valid = object.valid ?? false;
     message.message = (object.message !== undefined && object.message !== null)
       ? Message.fromPartial(object.message)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseSubmitBulkMessagesRequest(): SubmitBulkMessagesRequest {
+  return { messages: [] };
+}
+
+export const SubmitBulkMessagesRequest = {
+  encode(message: SubmitBulkMessagesRequest, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    for (const v of message.messages) {
+      Message.encode(v!, writer.uint32(10).fork()).ldelim();
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): SubmitBulkMessagesRequest {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSubmitBulkMessagesRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag != 10) {
+            break;
+          }
+
+          message.messages.push(Message.decode(reader, reader.uint32()));
+          continue;
+      }
+      if ((tag & 7) == 4 || tag == 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): SubmitBulkMessagesRequest {
+    return { messages: Array.isArray(object?.messages) ? object.messages.map((e: any) => Message.fromJSON(e)) : [] };
+  },
+
+  toJSON(message: SubmitBulkMessagesRequest): unknown {
+    const obj: any = {};
+    if (message.messages) {
+      obj.messages = message.messages.map((e) => e ? Message.toJSON(e) : undefined);
+    } else {
+      obj.messages = [];
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<SubmitBulkMessagesRequest>, I>>(base?: I): SubmitBulkMessagesRequest {
+    return SubmitBulkMessagesRequest.fromPartial(base ?? {});
+  },
+
+  fromPartial<I extends Exact<DeepPartial<SubmitBulkMessagesRequest>, I>>(object: I): SubmitBulkMessagesRequest {
+    const message = createBaseSubmitBulkMessagesRequest();
+    message.messages = object.messages?.map((e) => Message.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseMessageError(): MessageError {
+  return { hash: new Uint8Array(), errCode: "", message: "" };
+}
+
+export const MessageError = {
+  encode(message: MessageError, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    if (message.hash.length !== 0) {
+      writer.uint32(10).bytes(message.hash);
+    }
+    if (message.errCode !== "") {
+      writer.uint32(18).string(message.errCode);
+    }
+    if (message.message !== "") {
+      writer.uint32(26).string(message.message);
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): MessageError {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMessageError();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag != 10) {
+            break;
+          }
+
+          message.hash = reader.bytes();
+          continue;
+        case 2:
+          if (tag != 18) {
+            break;
+          }
+
+          message.errCode = reader.string();
+          continue;
+        case 3:
+          if (tag != 26) {
+            break;
+          }
+
+          message.message = reader.string();
+          continue;
+      }
+      if ((tag & 7) == 4 || tag == 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MessageError {
+    return {
+      hash: isSet(object.hash) ? bytesFromBase64(object.hash) : new Uint8Array(),
+      errCode: isSet(object.errCode) ? String(object.errCode) : "",
+      message: isSet(object.message) ? String(object.message) : "",
+    };
+  },
+
+  toJSON(message: MessageError): unknown {
+    const obj: any = {};
+    message.hash !== undefined &&
+      (obj.hash = base64FromBytes(message.hash !== undefined ? message.hash : new Uint8Array()));
+    message.errCode !== undefined && (obj.errCode = message.errCode);
+    message.message !== undefined && (obj.message = message.message);
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<MessageError>, I>>(base?: I): MessageError {
+    return MessageError.fromPartial(base ?? {});
+  },
+
+  fromPartial<I extends Exact<DeepPartial<MessageError>, I>>(object: I): MessageError {
+    const message = createBaseMessageError();
+    message.hash = object.hash ?? new Uint8Array();
+    message.errCode = object.errCode ?? "";
+    message.message = object.message ?? "";
+    return message;
+  },
+};
+
+function createBaseBulkMessageResponse(): BulkMessageResponse {
+  return { message: undefined, messageError: undefined };
+}
+
+export const BulkMessageResponse = {
+  encode(message: BulkMessageResponse, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    if (message.message !== undefined) {
+      Message.encode(message.message, writer.uint32(10).fork()).ldelim();
+    }
+    if (message.messageError !== undefined) {
+      MessageError.encode(message.messageError, writer.uint32(18).fork()).ldelim();
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): BulkMessageResponse {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseBulkMessageResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag != 10) {
+            break;
+          }
+
+          message.message = Message.decode(reader, reader.uint32());
+          continue;
+        case 2:
+          if (tag != 18) {
+            break;
+          }
+
+          message.messageError = MessageError.decode(reader, reader.uint32());
+          continue;
+      }
+      if ((tag & 7) == 4 || tag == 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): BulkMessageResponse {
+    return {
+      message: isSet(object.message) ? Message.fromJSON(object.message) : undefined,
+      messageError: isSet(object.messageError) ? MessageError.fromJSON(object.messageError) : undefined,
+    };
+  },
+
+  toJSON(message: BulkMessageResponse): unknown {
+    const obj: any = {};
+    message.message !== undefined && (obj.message = message.message ? Message.toJSON(message.message) : undefined);
+    message.messageError !== undefined &&
+      (obj.messageError = message.messageError ? MessageError.toJSON(message.messageError) : undefined);
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<BulkMessageResponse>, I>>(base?: I): BulkMessageResponse {
+    return BulkMessageResponse.fromPartial(base ?? {});
+  },
+
+  fromPartial<I extends Exact<DeepPartial<BulkMessageResponse>, I>>(object: I): BulkMessageResponse {
+    const message = createBaseBulkMessageResponse();
+    message.message = (object.message !== undefined && object.message !== null)
+      ? Message.fromPartial(object.message)
+      : undefined;
+    message.messageError = (object.messageError !== undefined && object.messageError !== null)
+      ? MessageError.fromPartial(object.messageError)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseSubmitBulkMessagesResponse(): SubmitBulkMessagesResponse {
+  return { messages: [] };
+}
+
+export const SubmitBulkMessagesResponse = {
+  encode(message: SubmitBulkMessagesResponse, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    for (const v of message.messages) {
+      BulkMessageResponse.encode(v!, writer.uint32(10).fork()).ldelim();
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): SubmitBulkMessagesResponse {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSubmitBulkMessagesResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag != 10) {
+            break;
+          }
+
+          message.messages.push(BulkMessageResponse.decode(reader, reader.uint32()));
+          continue;
+      }
+      if ((tag & 7) == 4 || tag == 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): SubmitBulkMessagesResponse {
+    return {
+      messages: Array.isArray(object?.messages) ? object.messages.map((e: any) => BulkMessageResponse.fromJSON(e)) : [],
+    };
+  },
+
+  toJSON(message: SubmitBulkMessagesResponse): unknown {
+    const obj: any = {};
+    if (message.messages) {
+      obj.messages = message.messages.map((e) => e ? BulkMessageResponse.toJSON(e) : undefined);
+    } else {
+      obj.messages = [];
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<SubmitBulkMessagesResponse>, I>>(base?: I): SubmitBulkMessagesResponse {
+    return SubmitBulkMessagesResponse.fromPartial(base ?? {});
+  },
+
+  fromPartial<I extends Exact<DeepPartial<SubmitBulkMessagesResponse>, I>>(object: I): SubmitBulkMessagesResponse {
+    const message = createBaseSubmitBulkMessagesResponse();
+    message.messages = object.messages?.map((e) => BulkMessageResponse.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseStreamSyncRequest(): StreamSyncRequest {
+  return {
+    getInfo: undefined,
+    getCurrentPeers: undefined,
+    stopSync: undefined,
+    forceSync: undefined,
+    getSyncStatus: undefined,
+    getAllSyncIdsByPrefix: undefined,
+    getAllMessagesBySyncIds: undefined,
+    getSyncMetadataByPrefix: undefined,
+    getSyncSnapshotByPrefix: undefined,
+    getOnChainEvents: undefined,
+    getOnChainSignersByFid: undefined,
+  };
+}
+
+export const StreamSyncRequest = {
+  encode(message: StreamSyncRequest, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    if (message.getInfo !== undefined) {
+      HubInfoRequest.encode(message.getInfo, writer.uint32(10).fork()).ldelim();
+    }
+    if (message.getCurrentPeers !== undefined) {
+      Empty.encode(message.getCurrentPeers, writer.uint32(18).fork()).ldelim();
+    }
+    if (message.stopSync !== undefined) {
+      Empty.encode(message.stopSync, writer.uint32(26).fork()).ldelim();
+    }
+    if (message.forceSync !== undefined) {
+      SyncStatusRequest.encode(message.forceSync, writer.uint32(34).fork()).ldelim();
+    }
+    if (message.getSyncStatus !== undefined) {
+      SyncStatusRequest.encode(message.getSyncStatus, writer.uint32(42).fork()).ldelim();
+    }
+    if (message.getAllSyncIdsByPrefix !== undefined) {
+      TrieNodePrefix.encode(message.getAllSyncIdsByPrefix, writer.uint32(50).fork()).ldelim();
+    }
+    if (message.getAllMessagesBySyncIds !== undefined) {
+      SyncIds.encode(message.getAllMessagesBySyncIds, writer.uint32(58).fork()).ldelim();
+    }
+    if (message.getSyncMetadataByPrefix !== undefined) {
+      TrieNodePrefix.encode(message.getSyncMetadataByPrefix, writer.uint32(66).fork()).ldelim();
+    }
+    if (message.getSyncSnapshotByPrefix !== undefined) {
+      TrieNodePrefix.encode(message.getSyncSnapshotByPrefix, writer.uint32(74).fork()).ldelim();
+    }
+    if (message.getOnChainEvents !== undefined) {
+      OnChainEventRequest.encode(message.getOnChainEvents, writer.uint32(82).fork()).ldelim();
+    }
+    if (message.getOnChainSignersByFid !== undefined) {
+      FidRequest.encode(message.getOnChainSignersByFid, writer.uint32(90).fork()).ldelim();
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): StreamSyncRequest {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseStreamSyncRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag != 10) {
+            break;
+          }
+
+          message.getInfo = HubInfoRequest.decode(reader, reader.uint32());
+          continue;
+        case 2:
+          if (tag != 18) {
+            break;
+          }
+
+          message.getCurrentPeers = Empty.decode(reader, reader.uint32());
+          continue;
+        case 3:
+          if (tag != 26) {
+            break;
+          }
+
+          message.stopSync = Empty.decode(reader, reader.uint32());
+          continue;
+        case 4:
+          if (tag != 34) {
+            break;
+          }
+
+          message.forceSync = SyncStatusRequest.decode(reader, reader.uint32());
+          continue;
+        case 5:
+          if (tag != 42) {
+            break;
+          }
+
+          message.getSyncStatus = SyncStatusRequest.decode(reader, reader.uint32());
+          continue;
+        case 6:
+          if (tag != 50) {
+            break;
+          }
+
+          message.getAllSyncIdsByPrefix = TrieNodePrefix.decode(reader, reader.uint32());
+          continue;
+        case 7:
+          if (tag != 58) {
+            break;
+          }
+
+          message.getAllMessagesBySyncIds = SyncIds.decode(reader, reader.uint32());
+          continue;
+        case 8:
+          if (tag != 66) {
+            break;
+          }
+
+          message.getSyncMetadataByPrefix = TrieNodePrefix.decode(reader, reader.uint32());
+          continue;
+        case 9:
+          if (tag != 74) {
+            break;
+          }
+
+          message.getSyncSnapshotByPrefix = TrieNodePrefix.decode(reader, reader.uint32());
+          continue;
+        case 10:
+          if (tag != 82) {
+            break;
+          }
+
+          message.getOnChainEvents = OnChainEventRequest.decode(reader, reader.uint32());
+          continue;
+        case 11:
+          if (tag != 90) {
+            break;
+          }
+
+          message.getOnChainSignersByFid = FidRequest.decode(reader, reader.uint32());
+          continue;
+      }
+      if ((tag & 7) == 4 || tag == 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): StreamSyncRequest {
+    return {
+      getInfo: isSet(object.getInfo) ? HubInfoRequest.fromJSON(object.getInfo) : undefined,
+      getCurrentPeers: isSet(object.getCurrentPeers) ? Empty.fromJSON(object.getCurrentPeers) : undefined,
+      stopSync: isSet(object.stopSync) ? Empty.fromJSON(object.stopSync) : undefined,
+      forceSync: isSet(object.forceSync) ? SyncStatusRequest.fromJSON(object.forceSync) : undefined,
+      getSyncStatus: isSet(object.getSyncStatus) ? SyncStatusRequest.fromJSON(object.getSyncStatus) : undefined,
+      getAllSyncIdsByPrefix: isSet(object.getAllSyncIdsByPrefix)
+        ? TrieNodePrefix.fromJSON(object.getAllSyncIdsByPrefix)
+        : undefined,
+      getAllMessagesBySyncIds: isSet(object.getAllMessagesBySyncIds)
+        ? SyncIds.fromJSON(object.getAllMessagesBySyncIds)
+        : undefined,
+      getSyncMetadataByPrefix: isSet(object.getSyncMetadataByPrefix)
+        ? TrieNodePrefix.fromJSON(object.getSyncMetadataByPrefix)
+        : undefined,
+      getSyncSnapshotByPrefix: isSet(object.getSyncSnapshotByPrefix)
+        ? TrieNodePrefix.fromJSON(object.getSyncSnapshotByPrefix)
+        : undefined,
+      getOnChainEvents: isSet(object.getOnChainEvents)
+        ? OnChainEventRequest.fromJSON(object.getOnChainEvents)
+        : undefined,
+      getOnChainSignersByFid: isSet(object.getOnChainSignersByFid)
+        ? FidRequest.fromJSON(object.getOnChainSignersByFid)
+        : undefined,
+    };
+  },
+
+  toJSON(message: StreamSyncRequest): unknown {
+    const obj: any = {};
+    message.getInfo !== undefined &&
+      (obj.getInfo = message.getInfo ? HubInfoRequest.toJSON(message.getInfo) : undefined);
+    message.getCurrentPeers !== undefined &&
+      (obj.getCurrentPeers = message.getCurrentPeers ? Empty.toJSON(message.getCurrentPeers) : undefined);
+    message.stopSync !== undefined && (obj.stopSync = message.stopSync ? Empty.toJSON(message.stopSync) : undefined);
+    message.forceSync !== undefined &&
+      (obj.forceSync = message.forceSync ? SyncStatusRequest.toJSON(message.forceSync) : undefined);
+    message.getSyncStatus !== undefined &&
+      (obj.getSyncStatus = message.getSyncStatus ? SyncStatusRequest.toJSON(message.getSyncStatus) : undefined);
+    message.getAllSyncIdsByPrefix !== undefined && (obj.getAllSyncIdsByPrefix = message.getAllSyncIdsByPrefix
+      ? TrieNodePrefix.toJSON(message.getAllSyncIdsByPrefix)
+      : undefined);
+    message.getAllMessagesBySyncIds !== undefined && (obj.getAllMessagesBySyncIds = message.getAllMessagesBySyncIds
+      ? SyncIds.toJSON(message.getAllMessagesBySyncIds)
+      : undefined);
+    message.getSyncMetadataByPrefix !== undefined && (obj.getSyncMetadataByPrefix = message.getSyncMetadataByPrefix
+      ? TrieNodePrefix.toJSON(message.getSyncMetadataByPrefix)
+      : undefined);
+    message.getSyncSnapshotByPrefix !== undefined && (obj.getSyncSnapshotByPrefix = message.getSyncSnapshotByPrefix
+      ? TrieNodePrefix.toJSON(message.getSyncSnapshotByPrefix)
+      : undefined);
+    message.getOnChainEvents !== undefined && (obj.getOnChainEvents = message.getOnChainEvents
+      ? OnChainEventRequest.toJSON(message.getOnChainEvents)
+      : undefined);
+    message.getOnChainSignersByFid !== undefined && (obj.getOnChainSignersByFid = message.getOnChainSignersByFid
+      ? FidRequest.toJSON(message.getOnChainSignersByFid)
+      : undefined);
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<StreamSyncRequest>, I>>(base?: I): StreamSyncRequest {
+    return StreamSyncRequest.fromPartial(base ?? {});
+  },
+
+  fromPartial<I extends Exact<DeepPartial<StreamSyncRequest>, I>>(object: I): StreamSyncRequest {
+    const message = createBaseStreamSyncRequest();
+    message.getInfo = (object.getInfo !== undefined && object.getInfo !== null)
+      ? HubInfoRequest.fromPartial(object.getInfo)
+      : undefined;
+    message.getCurrentPeers = (object.getCurrentPeers !== undefined && object.getCurrentPeers !== null)
+      ? Empty.fromPartial(object.getCurrentPeers)
+      : undefined;
+    message.stopSync = (object.stopSync !== undefined && object.stopSync !== null)
+      ? Empty.fromPartial(object.stopSync)
+      : undefined;
+    message.forceSync = (object.forceSync !== undefined && object.forceSync !== null)
+      ? SyncStatusRequest.fromPartial(object.forceSync)
+      : undefined;
+    message.getSyncStatus = (object.getSyncStatus !== undefined && object.getSyncStatus !== null)
+      ? SyncStatusRequest.fromPartial(object.getSyncStatus)
+      : undefined;
+    message.getAllSyncIdsByPrefix =
+      (object.getAllSyncIdsByPrefix !== undefined && object.getAllSyncIdsByPrefix !== null)
+        ? TrieNodePrefix.fromPartial(object.getAllSyncIdsByPrefix)
+        : undefined;
+    message.getAllMessagesBySyncIds =
+      (object.getAllMessagesBySyncIds !== undefined && object.getAllMessagesBySyncIds !== null)
+        ? SyncIds.fromPartial(object.getAllMessagesBySyncIds)
+        : undefined;
+    message.getSyncMetadataByPrefix =
+      (object.getSyncMetadataByPrefix !== undefined && object.getSyncMetadataByPrefix !== null)
+        ? TrieNodePrefix.fromPartial(object.getSyncMetadataByPrefix)
+        : undefined;
+    message.getSyncSnapshotByPrefix =
+      (object.getSyncSnapshotByPrefix !== undefined && object.getSyncSnapshotByPrefix !== null)
+        ? TrieNodePrefix.fromPartial(object.getSyncSnapshotByPrefix)
+        : undefined;
+    message.getOnChainEvents = (object.getOnChainEvents !== undefined && object.getOnChainEvents !== null)
+      ? OnChainEventRequest.fromPartial(object.getOnChainEvents)
+      : undefined;
+    message.getOnChainSignersByFid =
+      (object.getOnChainSignersByFid !== undefined && object.getOnChainSignersByFid !== null)
+        ? FidRequest.fromPartial(object.getOnChainSignersByFid)
+        : undefined;
+    return message;
+  },
+};
+
+function createBaseStreamError(): StreamError {
+  return { errCode: "", message: "", request: "" };
+}
+
+export const StreamError = {
+  encode(message: StreamError, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    if (message.errCode !== "") {
+      writer.uint32(10).string(message.errCode);
+    }
+    if (message.message !== "") {
+      writer.uint32(18).string(message.message);
+    }
+    if (message.request !== "") {
+      writer.uint32(26).string(message.request);
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): StreamError {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseStreamError();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag != 10) {
+            break;
+          }
+
+          message.errCode = reader.string();
+          continue;
+        case 2:
+          if (tag != 18) {
+            break;
+          }
+
+          message.message = reader.string();
+          continue;
+        case 3:
+          if (tag != 26) {
+            break;
+          }
+
+          message.request = reader.string();
+          continue;
+      }
+      if ((tag & 7) == 4 || tag == 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): StreamError {
+    return {
+      errCode: isSet(object.errCode) ? String(object.errCode) : "",
+      message: isSet(object.message) ? String(object.message) : "",
+      request: isSet(object.request) ? String(object.request) : "",
+    };
+  },
+
+  toJSON(message: StreamError): unknown {
+    const obj: any = {};
+    message.errCode !== undefined && (obj.errCode = message.errCode);
+    message.message !== undefined && (obj.message = message.message);
+    message.request !== undefined && (obj.request = message.request);
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<StreamError>, I>>(base?: I): StreamError {
+    return StreamError.fromPartial(base ?? {});
+  },
+
+  fromPartial<I extends Exact<DeepPartial<StreamError>, I>>(object: I): StreamError {
+    const message = createBaseStreamError();
+    message.errCode = object.errCode ?? "";
+    message.message = object.message ?? "";
+    message.request = object.request ?? "";
+    return message;
+  },
+};
+
+function createBaseStreamSyncResponse(): StreamSyncResponse {
+  return {
+    getInfo: undefined,
+    getCurrentPeers: undefined,
+    stopSync: undefined,
+    forceSync: undefined,
+    getSyncStatus: undefined,
+    getAllSyncIdsByPrefix: undefined,
+    getAllMessagesBySyncIds: undefined,
+    getSyncMetadataByPrefix: undefined,
+    getSyncSnapshotByPrefix: undefined,
+    getOnChainEvents: undefined,
+    getOnChainSignersByFid: undefined,
+    error: undefined,
+  };
+}
+
+export const StreamSyncResponse = {
+  encode(message: StreamSyncResponse, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    if (message.getInfo !== undefined) {
+      HubInfoResponse.encode(message.getInfo, writer.uint32(10).fork()).ldelim();
+    }
+    if (message.getCurrentPeers !== undefined) {
+      ContactInfoResponse.encode(message.getCurrentPeers, writer.uint32(18).fork()).ldelim();
+    }
+    if (message.stopSync !== undefined) {
+      SyncStatusResponse.encode(message.stopSync, writer.uint32(26).fork()).ldelim();
+    }
+    if (message.forceSync !== undefined) {
+      SyncStatusResponse.encode(message.forceSync, writer.uint32(34).fork()).ldelim();
+    }
+    if (message.getSyncStatus !== undefined) {
+      SyncStatusResponse.encode(message.getSyncStatus, writer.uint32(42).fork()).ldelim();
+    }
+    if (message.getAllSyncIdsByPrefix !== undefined) {
+      SyncIds.encode(message.getAllSyncIdsByPrefix, writer.uint32(50).fork()).ldelim();
+    }
+    if (message.getAllMessagesBySyncIds !== undefined) {
+      MessagesResponse.encode(message.getAllMessagesBySyncIds, writer.uint32(58).fork()).ldelim();
+    }
+    if (message.getSyncMetadataByPrefix !== undefined) {
+      TrieNodeMetadataResponse.encode(message.getSyncMetadataByPrefix, writer.uint32(66).fork()).ldelim();
+    }
+    if (message.getSyncSnapshotByPrefix !== undefined) {
+      TrieNodeSnapshotResponse.encode(message.getSyncSnapshotByPrefix, writer.uint32(74).fork()).ldelim();
+    }
+    if (message.getOnChainEvents !== undefined) {
+      OnChainEventResponse.encode(message.getOnChainEvents, writer.uint32(82).fork()).ldelim();
+    }
+    if (message.getOnChainSignersByFid !== undefined) {
+      OnChainEventResponse.encode(message.getOnChainSignersByFid, writer.uint32(90).fork()).ldelim();
+    }
+    if (message.error !== undefined) {
+      StreamError.encode(message.error, writer.uint32(98).fork()).ldelim();
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): StreamSyncResponse {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseStreamSyncResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag != 10) {
+            break;
+          }
+
+          message.getInfo = HubInfoResponse.decode(reader, reader.uint32());
+          continue;
+        case 2:
+          if (tag != 18) {
+            break;
+          }
+
+          message.getCurrentPeers = ContactInfoResponse.decode(reader, reader.uint32());
+          continue;
+        case 3:
+          if (tag != 26) {
+            break;
+          }
+
+          message.stopSync = SyncStatusResponse.decode(reader, reader.uint32());
+          continue;
+        case 4:
+          if (tag != 34) {
+            break;
+          }
+
+          message.forceSync = SyncStatusResponse.decode(reader, reader.uint32());
+          continue;
+        case 5:
+          if (tag != 42) {
+            break;
+          }
+
+          message.getSyncStatus = SyncStatusResponse.decode(reader, reader.uint32());
+          continue;
+        case 6:
+          if (tag != 50) {
+            break;
+          }
+
+          message.getAllSyncIdsByPrefix = SyncIds.decode(reader, reader.uint32());
+          continue;
+        case 7:
+          if (tag != 58) {
+            break;
+          }
+
+          message.getAllMessagesBySyncIds = MessagesResponse.decode(reader, reader.uint32());
+          continue;
+        case 8:
+          if (tag != 66) {
+            break;
+          }
+
+          message.getSyncMetadataByPrefix = TrieNodeMetadataResponse.decode(reader, reader.uint32());
+          continue;
+        case 9:
+          if (tag != 74) {
+            break;
+          }
+
+          message.getSyncSnapshotByPrefix = TrieNodeSnapshotResponse.decode(reader, reader.uint32());
+          continue;
+        case 10:
+          if (tag != 82) {
+            break;
+          }
+
+          message.getOnChainEvents = OnChainEventResponse.decode(reader, reader.uint32());
+          continue;
+        case 11:
+          if (tag != 90) {
+            break;
+          }
+
+          message.getOnChainSignersByFid = OnChainEventResponse.decode(reader, reader.uint32());
+          continue;
+        case 12:
+          if (tag != 98) {
+            break;
+          }
+
+          message.error = StreamError.decode(reader, reader.uint32());
+          continue;
+      }
+      if ((tag & 7) == 4 || tag == 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): StreamSyncResponse {
+    return {
+      getInfo: isSet(object.getInfo) ? HubInfoResponse.fromJSON(object.getInfo) : undefined,
+      getCurrentPeers: isSet(object.getCurrentPeers) ? ContactInfoResponse.fromJSON(object.getCurrentPeers) : undefined,
+      stopSync: isSet(object.stopSync) ? SyncStatusResponse.fromJSON(object.stopSync) : undefined,
+      forceSync: isSet(object.forceSync) ? SyncStatusResponse.fromJSON(object.forceSync) : undefined,
+      getSyncStatus: isSet(object.getSyncStatus) ? SyncStatusResponse.fromJSON(object.getSyncStatus) : undefined,
+      getAllSyncIdsByPrefix: isSet(object.getAllSyncIdsByPrefix)
+        ? SyncIds.fromJSON(object.getAllSyncIdsByPrefix)
+        : undefined,
+      getAllMessagesBySyncIds: isSet(object.getAllMessagesBySyncIds)
+        ? MessagesResponse.fromJSON(object.getAllMessagesBySyncIds)
+        : undefined,
+      getSyncMetadataByPrefix: isSet(object.getSyncMetadataByPrefix)
+        ? TrieNodeMetadataResponse.fromJSON(object.getSyncMetadataByPrefix)
+        : undefined,
+      getSyncSnapshotByPrefix: isSet(object.getSyncSnapshotByPrefix)
+        ? TrieNodeSnapshotResponse.fromJSON(object.getSyncSnapshotByPrefix)
+        : undefined,
+      getOnChainEvents: isSet(object.getOnChainEvents)
+        ? OnChainEventResponse.fromJSON(object.getOnChainEvents)
+        : undefined,
+      getOnChainSignersByFid: isSet(object.getOnChainSignersByFid)
+        ? OnChainEventResponse.fromJSON(object.getOnChainSignersByFid)
+        : undefined,
+      error: isSet(object.error) ? StreamError.fromJSON(object.error) : undefined,
+    };
+  },
+
+  toJSON(message: StreamSyncResponse): unknown {
+    const obj: any = {};
+    message.getInfo !== undefined &&
+      (obj.getInfo = message.getInfo ? HubInfoResponse.toJSON(message.getInfo) : undefined);
+    message.getCurrentPeers !== undefined &&
+      (obj.getCurrentPeers = message.getCurrentPeers ? ContactInfoResponse.toJSON(message.getCurrentPeers) : undefined);
+    message.stopSync !== undefined &&
+      (obj.stopSync = message.stopSync ? SyncStatusResponse.toJSON(message.stopSync) : undefined);
+    message.forceSync !== undefined &&
+      (obj.forceSync = message.forceSync ? SyncStatusResponse.toJSON(message.forceSync) : undefined);
+    message.getSyncStatus !== undefined &&
+      (obj.getSyncStatus = message.getSyncStatus ? SyncStatusResponse.toJSON(message.getSyncStatus) : undefined);
+    message.getAllSyncIdsByPrefix !== undefined && (obj.getAllSyncIdsByPrefix = message.getAllSyncIdsByPrefix
+      ? SyncIds.toJSON(message.getAllSyncIdsByPrefix)
+      : undefined);
+    message.getAllMessagesBySyncIds !== undefined && (obj.getAllMessagesBySyncIds = message.getAllMessagesBySyncIds
+      ? MessagesResponse.toJSON(message.getAllMessagesBySyncIds)
+      : undefined);
+    message.getSyncMetadataByPrefix !== undefined && (obj.getSyncMetadataByPrefix = message.getSyncMetadataByPrefix
+      ? TrieNodeMetadataResponse.toJSON(message.getSyncMetadataByPrefix)
+      : undefined);
+    message.getSyncSnapshotByPrefix !== undefined && (obj.getSyncSnapshotByPrefix = message.getSyncSnapshotByPrefix
+      ? TrieNodeSnapshotResponse.toJSON(message.getSyncSnapshotByPrefix)
+      : undefined);
+    message.getOnChainEvents !== undefined && (obj.getOnChainEvents = message.getOnChainEvents
+      ? OnChainEventResponse.toJSON(message.getOnChainEvents)
+      : undefined);
+    message.getOnChainSignersByFid !== undefined && (obj.getOnChainSignersByFid = message.getOnChainSignersByFid
+      ? OnChainEventResponse.toJSON(message.getOnChainSignersByFid)
+      : undefined);
+    message.error !== undefined && (obj.error = message.error ? StreamError.toJSON(message.error) : undefined);
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<StreamSyncResponse>, I>>(base?: I): StreamSyncResponse {
+    return StreamSyncResponse.fromPartial(base ?? {});
+  },
+
+  fromPartial<I extends Exact<DeepPartial<StreamSyncResponse>, I>>(object: I): StreamSyncResponse {
+    const message = createBaseStreamSyncResponse();
+    message.getInfo = (object.getInfo !== undefined && object.getInfo !== null)
+      ? HubInfoResponse.fromPartial(object.getInfo)
+      : undefined;
+    message.getCurrentPeers = (object.getCurrentPeers !== undefined && object.getCurrentPeers !== null)
+      ? ContactInfoResponse.fromPartial(object.getCurrentPeers)
+      : undefined;
+    message.stopSync = (object.stopSync !== undefined && object.stopSync !== null)
+      ? SyncStatusResponse.fromPartial(object.stopSync)
+      : undefined;
+    message.forceSync = (object.forceSync !== undefined && object.forceSync !== null)
+      ? SyncStatusResponse.fromPartial(object.forceSync)
+      : undefined;
+    message.getSyncStatus = (object.getSyncStatus !== undefined && object.getSyncStatus !== null)
+      ? SyncStatusResponse.fromPartial(object.getSyncStatus)
+      : undefined;
+    message.getAllSyncIdsByPrefix =
+      (object.getAllSyncIdsByPrefix !== undefined && object.getAllSyncIdsByPrefix !== null)
+        ? SyncIds.fromPartial(object.getAllSyncIdsByPrefix)
+        : undefined;
+    message.getAllMessagesBySyncIds =
+      (object.getAllMessagesBySyncIds !== undefined && object.getAllMessagesBySyncIds !== null)
+        ? MessagesResponse.fromPartial(object.getAllMessagesBySyncIds)
+        : undefined;
+    message.getSyncMetadataByPrefix =
+      (object.getSyncMetadataByPrefix !== undefined && object.getSyncMetadataByPrefix !== null)
+        ? TrieNodeMetadataResponse.fromPartial(object.getSyncMetadataByPrefix)
+        : undefined;
+    message.getSyncSnapshotByPrefix =
+      (object.getSyncSnapshotByPrefix !== undefined && object.getSyncSnapshotByPrefix !== null)
+        ? TrieNodeSnapshotResponse.fromPartial(object.getSyncSnapshotByPrefix)
+        : undefined;
+    message.getOnChainEvents = (object.getOnChainEvents !== undefined && object.getOnChainEvents !== null)
+      ? OnChainEventResponse.fromPartial(object.getOnChainEvents)
+      : undefined;
+    message.getOnChainSignersByFid =
+      (object.getOnChainSignersByFid !== undefined && object.getOnChainSignersByFid !== null)
+        ? OnChainEventResponse.fromPartial(object.getOnChainSignersByFid)
+        : undefined;
+    message.error = (object.error !== undefined && object.error !== null)
+      ? StreamError.fromPartial(object.error)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseStreamFetchRequest(): StreamFetchRequest {
+  return {
+    idempotencyKey: "",
+    castMessagesByFid: undefined,
+    reactionMessagesByFid: undefined,
+    verificationMessagesByFid: undefined,
+    userDataMessagesByFid: undefined,
+    linkMessagesByFid: undefined,
+  };
+}
+
+export const StreamFetchRequest = {
+  encode(message: StreamFetchRequest, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    if (message.idempotencyKey !== "") {
+      writer.uint32(10).string(message.idempotencyKey);
+    }
+    if (message.castMessagesByFid !== undefined) {
+      FidTimestampRequest.encode(message.castMessagesByFid, writer.uint32(18).fork()).ldelim();
+    }
+    if (message.reactionMessagesByFid !== undefined) {
+      FidTimestampRequest.encode(message.reactionMessagesByFid, writer.uint32(26).fork()).ldelim();
+    }
+    if (message.verificationMessagesByFid !== undefined) {
+      FidTimestampRequest.encode(message.verificationMessagesByFid, writer.uint32(34).fork()).ldelim();
+    }
+    if (message.userDataMessagesByFid !== undefined) {
+      FidTimestampRequest.encode(message.userDataMessagesByFid, writer.uint32(42).fork()).ldelim();
+    }
+    if (message.linkMessagesByFid !== undefined) {
+      FidTimestampRequest.encode(message.linkMessagesByFid, writer.uint32(50).fork()).ldelim();
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): StreamFetchRequest {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseStreamFetchRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag != 10) {
+            break;
+          }
+
+          message.idempotencyKey = reader.string();
+          continue;
+        case 2:
+          if (tag != 18) {
+            break;
+          }
+
+          message.castMessagesByFid = FidTimestampRequest.decode(reader, reader.uint32());
+          continue;
+        case 3:
+          if (tag != 26) {
+            break;
+          }
+
+          message.reactionMessagesByFid = FidTimestampRequest.decode(reader, reader.uint32());
+          continue;
+        case 4:
+          if (tag != 34) {
+            break;
+          }
+
+          message.verificationMessagesByFid = FidTimestampRequest.decode(reader, reader.uint32());
+          continue;
+        case 5:
+          if (tag != 42) {
+            break;
+          }
+
+          message.userDataMessagesByFid = FidTimestampRequest.decode(reader, reader.uint32());
+          continue;
+        case 6:
+          if (tag != 50) {
+            break;
+          }
+
+          message.linkMessagesByFid = FidTimestampRequest.decode(reader, reader.uint32());
+          continue;
+      }
+      if ((tag & 7) == 4 || tag == 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): StreamFetchRequest {
+    return {
+      idempotencyKey: isSet(object.idempotencyKey) ? String(object.idempotencyKey) : "",
+      castMessagesByFid: isSet(object.castMessagesByFid)
+        ? FidTimestampRequest.fromJSON(object.castMessagesByFid)
+        : undefined,
+      reactionMessagesByFid: isSet(object.reactionMessagesByFid)
+        ? FidTimestampRequest.fromJSON(object.reactionMessagesByFid)
+        : undefined,
+      verificationMessagesByFid: isSet(object.verificationMessagesByFid)
+        ? FidTimestampRequest.fromJSON(object.verificationMessagesByFid)
+        : undefined,
+      userDataMessagesByFid: isSet(object.userDataMessagesByFid)
+        ? FidTimestampRequest.fromJSON(object.userDataMessagesByFid)
+        : undefined,
+      linkMessagesByFid: isSet(object.linkMessagesByFid)
+        ? FidTimestampRequest.fromJSON(object.linkMessagesByFid)
+        : undefined,
+    };
+  },
+
+  toJSON(message: StreamFetchRequest): unknown {
+    const obj: any = {};
+    message.idempotencyKey !== undefined && (obj.idempotencyKey = message.idempotencyKey);
+    message.castMessagesByFid !== undefined && (obj.castMessagesByFid = message.castMessagesByFid
+      ? FidTimestampRequest.toJSON(message.castMessagesByFid)
+      : undefined);
+    message.reactionMessagesByFid !== undefined && (obj.reactionMessagesByFid = message.reactionMessagesByFid
+      ? FidTimestampRequest.toJSON(message.reactionMessagesByFid)
+      : undefined);
+    message.verificationMessagesByFid !== undefined &&
+      (obj.verificationMessagesByFid = message.verificationMessagesByFid
+        ? FidTimestampRequest.toJSON(message.verificationMessagesByFid)
+        : undefined);
+    message.userDataMessagesByFid !== undefined && (obj.userDataMessagesByFid = message.userDataMessagesByFid
+      ? FidTimestampRequest.toJSON(message.userDataMessagesByFid)
+      : undefined);
+    message.linkMessagesByFid !== undefined && (obj.linkMessagesByFid = message.linkMessagesByFid
+      ? FidTimestampRequest.toJSON(message.linkMessagesByFid)
+      : undefined);
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<StreamFetchRequest>, I>>(base?: I): StreamFetchRequest {
+    return StreamFetchRequest.fromPartial(base ?? {});
+  },
+
+  fromPartial<I extends Exact<DeepPartial<StreamFetchRequest>, I>>(object: I): StreamFetchRequest {
+    const message = createBaseStreamFetchRequest();
+    message.idempotencyKey = object.idempotencyKey ?? "";
+    message.castMessagesByFid = (object.castMessagesByFid !== undefined && object.castMessagesByFid !== null)
+      ? FidTimestampRequest.fromPartial(object.castMessagesByFid)
+      : undefined;
+    message.reactionMessagesByFid =
+      (object.reactionMessagesByFid !== undefined && object.reactionMessagesByFid !== null)
+        ? FidTimestampRequest.fromPartial(object.reactionMessagesByFid)
+        : undefined;
+    message.verificationMessagesByFid =
+      (object.verificationMessagesByFid !== undefined && object.verificationMessagesByFid !== null)
+        ? FidTimestampRequest.fromPartial(object.verificationMessagesByFid)
+        : undefined;
+    message.userDataMessagesByFid =
+      (object.userDataMessagesByFid !== undefined && object.userDataMessagesByFid !== null)
+        ? FidTimestampRequest.fromPartial(object.userDataMessagesByFid)
+        : undefined;
+    message.linkMessagesByFid = (object.linkMessagesByFid !== undefined && object.linkMessagesByFid !== null)
+      ? FidTimestampRequest.fromPartial(object.linkMessagesByFid)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseStreamFetchResponse(): StreamFetchResponse {
+  return { idempotencyKey: "", messages: undefined, error: undefined };
+}
+
+export const StreamFetchResponse = {
+  encode(message: StreamFetchResponse, writer: _m0.Writer = _m0.Writer.create()): _m0.Writer {
+    if (message.idempotencyKey !== "") {
+      writer.uint32(10).string(message.idempotencyKey);
+    }
+    if (message.messages !== undefined) {
+      MessagesResponse.encode(message.messages, writer.uint32(18).fork()).ldelim();
+    }
+    if (message.error !== undefined) {
+      StreamError.encode(message.error, writer.uint32(26).fork()).ldelim();
+    }
+    return writer;
+  },
+
+  decode(input: _m0.Reader | Uint8Array, length?: number): StreamFetchResponse {
+    const reader = input instanceof _m0.Reader ? input : _m0.Reader.create(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseStreamFetchResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1:
+          if (tag != 10) {
+            break;
+          }
+
+          message.idempotencyKey = reader.string();
+          continue;
+        case 2:
+          if (tag != 18) {
+            break;
+          }
+
+          message.messages = MessagesResponse.decode(reader, reader.uint32());
+          continue;
+        case 3:
+          if (tag != 26) {
+            break;
+          }
+
+          message.error = StreamError.decode(reader, reader.uint32());
+          continue;
+      }
+      if ((tag & 7) == 4 || tag == 0) {
+        break;
+      }
+      reader.skipType(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): StreamFetchResponse {
+    return {
+      idempotencyKey: isSet(object.idempotencyKey) ? String(object.idempotencyKey) : "",
+      messages: isSet(object.messages) ? MessagesResponse.fromJSON(object.messages) : undefined,
+      error: isSet(object.error) ? StreamError.fromJSON(object.error) : undefined,
+    };
+  },
+
+  toJSON(message: StreamFetchResponse): unknown {
+    const obj: any = {};
+    message.idempotencyKey !== undefined && (obj.idempotencyKey = message.idempotencyKey);
+    message.messages !== undefined &&
+      (obj.messages = message.messages ? MessagesResponse.toJSON(message.messages) : undefined);
+    message.error !== undefined && (obj.error = message.error ? StreamError.toJSON(message.error) : undefined);
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<StreamFetchResponse>, I>>(base?: I): StreamFetchResponse {
+    return StreamFetchResponse.fromPartial(base ?? {});
+  },
+
+  fromPartial<I extends Exact<DeepPartial<StreamFetchResponse>, I>>(object: I): StreamFetchResponse {
+    const message = createBaseStreamFetchResponse();
+    message.idempotencyKey = object.idempotencyKey ?? "";
+    message.messages = (object.messages !== undefined && object.messages !== null)
+      ? MessagesResponse.fromPartial(object.messages)
+      : undefined;
+    message.error = (object.error !== undefined && object.error !== null)
+      ? StreamError.fromPartial(object.error)
       : undefined;
     return message;
   },
