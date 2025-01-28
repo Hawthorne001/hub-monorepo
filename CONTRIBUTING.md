@@ -24,7 +24,7 @@ No contribution is too small and we welcome your help. There's always something 
 
 - Opening issues or adding details to existing issues
 - Fixing bugs in the code
-- Making tests or the ci builds faster
+- Making tests or the CI builds faster
 - Improving the documentation
 - Keeping packages up-to-date
 - Proposing and implementing new features
@@ -42,11 +42,12 @@ Before you get down to coding, take a minute to consider this:
 
 First, ensure that the following are installed globally on your machine:
 
-- [Node.js 18.7+](https://nodejs.org/en/download/releases)
+- [Node.js 20.11+](https://nodejs.org/en/download/releases) using [nvm](https://github.com/nvm-sh/nvm)
 - [Yarn](https://classic.yarnpkg.com/lang/en/docs/install)
 - [Foundry](https://book.getfoundry.sh/getting-started/installation#using-foundryup)
 - [Protobuf compiler](https://protobuf.dev/downloads/)
 - [Rust](https://www.rust-lang.org/tools/install)
+- [CMake](https://formulae.brew.sh/formula/cmake)
 
 Then, from the root folder run:
 
@@ -54,7 +55,9 @@ Then, from the root folder run:
 - `yarn build` to build Hubble and its dependencies
 - `yarn test` to ensure that the test suite runs correctly
 
-### 2.2. Signing Commits
+NOTE: Running `yarn test` currently fails due to an environment issue with shuttle. you can still run `yarn test` successfully from all the other repositories.
+
+### 2.2 Signing Commits
 
 All commits need to be signed with a GPG key. This adds a second factor of authentication that proves that it came from
 you, and not someone who managed to compromise your GitHub account. You can enable signing by following these steps:
@@ -76,9 +79,9 @@ max-cache-ttl 100000000
 
 5. Commit all changes with your usual git commands and you should see a `Verified` badge near your commits
 
-### 2.3. Navigating the Monorepo
+### 2.3 Navigating the Monorepo
 
-The repository is a monorepo with a primary application in the `/apps/` folder that imports several packages `/packages/`. It is composed of yarn workspaces and uses [TurboRepo](https://turbo.build/) as its build system.
+The repository is a monorepo with a primary application in the `/apps/` folder that imports several packages `/packages/`. It is written primarily in Typescript and uses Yarn to orchestrate tasks and [TurboRepo](https://turbo.build/) as its build system. Some performance intensive code is written in Rust and compiled with Cargo.
 
 You can run commands like `yarn test` and `yarn build` which TurboRepo will automatically parallelize and execute across all workspaces. To execute the application, you'll need to navigate into the app folder and follow the instructions there. The TurboRepo documentation covers other important topics like:
 
@@ -91,7 +94,7 @@ TurboRepo uses a local cache which can be disabled by adding the `--force` optio
 
 When proposing a change, make sure that you've followed all of these steps before you ask for a review.
 
-### 3.1. Writing Tests
+### 3.1 Writing Tests
 
 All changes that involve features or bugfixes should be accompanied by tests, and remember that:
 
@@ -104,22 +107,22 @@ All changes that involve features or bugfixes should be accompanied by tests, an
 
 If your PR has changes to gRPC or protobuf files, you must update the [public documentation website](./apps/hubble/www/). See the [Protobuf README](./protobufs/README.md) for instructions on how to auto-gen the documentation.
 
-All PR's should have supporting documentation that makes reviewing and understanding the code easy. You should:
+All PRs should have supporting documentation that makes reviewing and understanding the code easy. You should:
 
-- Update high-level changes in the [contract docs](docs/docs.md).
+- Update high-level changes in the [contract docs](https://github.com/farcasterxyz/contracts/blob/main/docs/docs.md).
 - Always use TSDoc style comments for functions, variables, constants, events and params.
 - Prefer single-line comments `/** The comment */` when the TSDoc comment fits on a single line.
 - Always use regular comments `//` for inline commentary on code.
 - Comments explaining the 'why' when code is not obvious.
 - Do not comment obvious changes (e.g. `starts the db` before the line `db.start()`)
 - Add a `Safety: ..` comment explaining every use of `as`.
-- Prefer active, present-tense doing form (`Gets the connection`) over other forms (`Connection is obtained`, `Get the connection`, `We get the connection`, `will get a connection`)
+- Prefer active, present-tense doing form (e.g. `Gets the connection`) over other forms (e.g. `Connection is obtained`, `Get the connection`, `We get the connection`, `will get a connection`)
 
-### 3.3. Handling Errors
+### 3.3 Handling Errors
 
 Errors are not handled using `throw` and `try / catch` as is common with Javascript programs. This pattern makes it hard for people to reason about whether methods are safe which leads to incomplete test coverage, unexpected errors and less safety. Instead we use a more functional approach to dealing with errors. See [this issue](https://github.com/farcasterxyz/hub/issues/213) for the rationale behind this approach.
 
-All errors must be constructed using the `HubError` class which extends Error. It is stricter than error and requires a Hub Error Code (e.g. `unavailable.database_error`) and some additional context. Codes are used a replacement for error subclassing since they can be easily serialized over network calls. Codes also have multiple levels (e.g. `database_error` is a type of `unavailable`) which help with making decisions about error handling.
+All errors must be constructed using the `HubError` class which extends Error. It is stricter than error and requires a Hub Error Code (e.g. `unavailable.database_error`) and some additional context. Codes are used as a replacement for error subclassing since they can be easily serialized over network calls. Codes also have multiple levels (e.g. `database_error` is a type of `unavailable`) which help with making decisions about error handling.
 
 Functions that can fail should always return `HubResult` which is a type that can either be the desired value or an error. Callers of the function should inspect the value and handle the success and failure case explicitly. The HubResult is an alias over [neverthrow's Result](https://github.com/supermacro/neverthrow). If you have never used a language where this is common (like Rust) you may want to start with the [API docs](https://github.com/supermacro/neverthrow#api-documentation). This pattern ensures that:
 
@@ -180,7 +183,7 @@ const result = safeJsonStringify(json);
 
 ---
 
-Prefer `result.match` to handle HubResult since it is explicit about how all branches are handled
+Prefer `result.match` to handle `HubResult` since it is explicit about how all branches are handled
 
 ```ts
 const result = computationThatMightFail().match(
@@ -238,7 +241,7 @@ if (combinedResults.isErr()) {
 
 ---
 
-### 3.4. Creating the PR
+### 3.4 Creating the PR
 
 All submissions must be opened as a Pull Request and reviewed and approved by a project member. The CI build process
 will ensure that all tests pass and that all linters have been run correctly. In addition, you should ensure that:
@@ -261,7 +264,9 @@ Called Signer.verify with the correct parameter to ensure that older signature
 types would not pass verification in our Signer Sets
 ```
 
-### 3.5. Adding Changesets
+Make sure that all your files are formatted correctly. We use `biome` to format TypeScript files and `rustfmt` for the Rust files. To auto-format all the files run `yarn lint` to format all source files.
+
+### 3.5 Adding Changesets
 
 All PRs with meaningful changes should have a [changeset](https://github.com/changesets/changesets) which is a short
 description of the modifications being made to each package. Changesets are automatically converted into a changelog
@@ -270,22 +275,22 @@ when the repo manager runs a release process.
 1. Run `yarn changeset` to start the process
 2. Select the packages being modified with the space key
 3. Select minor version if breaking change or patch otherwise, since we haven't release 1.0 yet
-4. Commit the generates files into your branch.
+4. Commit the generated files into your branch.
 
 ### 3.6 Releasing Versions
 
-Permissions to publish to the @farcaster organization in NPM is necessary. This is a non-reversible process so if you
+Permission to publish to the @farcaster organization in NPM is necessary. This is a non-reversible process so if you
 are at all unsure about how to proceed, please reach out to Varun ([Github](https://github.com/varunsrin) | [Warpcast](https://warpcast.com/v))
 
 1. Checkout a new branch and run `yarn changeset version`
 2. Review CHANGELOG.md and confirm that it is accurate
 3. Check that `package.json` was bumped correctly
-3. If protocol version change, bump `FARCASTER_VERSIONS_SCHEDULE` and  `FARCASTER_VERSION`
+3. If the protocol version changes, bump `FARCASTER_VERSIONS_SCHEDULE` and  `FARCASTER_VERSION`
 4. Create commit, merge to main, check out commit on main and run `yarn build`
 5. Publish changes by running `yarn changeset publish`
 6. Fetch and update tags with `git fetch origin --tags && yarn changeset tag && git tag -f @latest`
 7. Delete the biome tags `git tag -d biome-config-custom@0.0.1`
-8. Push tags with `git push upstream HEAD --tags -f`
+8. Push tags with `git push origin HEAD --tags -f`
 9. If docker build does not start `git push upstream --delete @farcaster/hubble@<version> && git push upstream --tags @farcaster/hubble@<version>` to re-trigger it.
 10. Create a GitHub Release for Hubble, copying over the changelog and marking it as the latest.
 11. If this is a non-patch change, create an NFT for the release.
@@ -298,7 +303,7 @@ Some of the CPU intensive code is written in Rust for speed. We import the Rust 
 To add new code to Rust,
 1. Add it to `packages/core/src/addon/`
 2. Add a bridge implementation and types into `packages/core/src/addon/addon.js` and `packages/core/src/addon/addon.d.ts`
-3. Export the callable typescript function in `packages/core/src/rustfunctions.ts`. This function can then be used throught the project to transparently call into Rust from Typescript
+3. Export the callable typescript function in `packages/core/src/rustfunctions.ts`. This function can then be used throughout the project to transparently call into Rust from Typescript
 
 ### 3.8 DB Migrations
 

@@ -165,7 +165,7 @@ const NETWORK = FarcasterNetwork.TESTNET; // Network of the Hub
    * "🤓https://url-after-unicode.com can include URL immediately after emoji"
    */
 
-  const castWithEmojiLinkAttachmnent = await makeCastAdd(
+  const castWithEmojiLinkAttachment = await makeCastAdd(
     {
       text: "🤓https://url-after-unicode.com can include URL immediately after emoji",
       embeds: [{ url: "https://url-after-unicode.com" }],
@@ -176,10 +176,10 @@ const NETWORK = FarcasterNetwork.TESTNET; // Network of the Hub
     dataOptions,
     ed25519Signer,
   );
-  castResults.push(castWithEmojiLinkAttachmnent);
+  castResults.push(castWithEmojiLinkAttachment);
 
   /**
-   * Example 7: A cast that replies to a URL
+   * Example 8: A cast that replies to a URL
    *
    * "I think this is a great protocol 🚀"
    */
@@ -250,8 +250,8 @@ const NETWORK = FarcasterNetwork.TESTNET; // Network of the Hub
   const follow = await makeLinkAdd({ type: "follow", targetFid: 1 }, dataOptions, ed25519Signer);
   otherMessages.push(follow);
 
-  // Remove a follow by creating a link remove message with type "unfollow" to the fid you want to unfollow
-  const unfollow = await makeLinkRemove({ type: "unfollow", targetFid: 1 }, dataOptions, ed25519Signer);
+  // Remove a follow by creating a link remove message with type "follow" to the fid you want to unfollow
+  const unfollow = await makeLinkRemove({ type: "follow", targetFid: 1 }, dataOptions, ed25519Signer);
   otherMessages.push(unfollow);
 
   otherMessages.map((messageResult) => messageResult.map((message) => client.submitMessage(message)));

@@ -92,7 +92,7 @@ impl StoreEventHandler {
         txn: &mut RocksDbTransactionBatch,
         raw_event: &mut HubEvent,
     ) -> Result<u64, HubError> {
-        // Acquire the lock so we don't generate multiple IDs. This also serves as the commmit lock
+        // Acquire the lock so we don't generate multiple IDs. This also serves as the commit lock
         let mut generator = self.generator.lock().unwrap();
 
         // Generate the event ID
@@ -164,9 +164,7 @@ impl StoreEventHandler {
     }
 
     pub fn js_get_next_event_id(mut cx: FunctionContext) -> JsResult<JsNumber> {
-        let this = cx
-            .this()
-            .downcast_or_throw::<JsBox<Arc<StoreEventHandler>>, _>(&mut cx)?;
+        let this = cx.this::<JsBox<Arc<StoreEventHandler>>>()?;
 
         // Read an optional timestamp (number) from the arguments
         let timestamp = match cx.argument_opt(0) {

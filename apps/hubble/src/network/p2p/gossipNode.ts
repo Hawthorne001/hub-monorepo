@@ -1,4 +1,3 @@
-import { PublishResult } from "@libp2p/interface-pubsub";
 import { Worker } from "worker_threads";
 import {
   ContactInfoContent,
@@ -10,29 +9,40 @@ import {
   HubErrorCode,
   HubResult,
   Message,
+  MessageBundle,
 } from "@farcaster/hub-nodejs";
-import { Connection } from "@libp2p/interface-connection";
-import { PeerId } from "@libp2p/interface-peer-id";
+import {
+  Connection,
+  PeerId,
+  PeerInfo,
+  Message as GossipSubMessage,
+  PublishResult,
+  RSAPeerId,
+  Ed25519PeerId,
+  Secp256k1PeerId,
+} from "@libp2p/interface";
 import { peerIdFromBytes, peerIdFromString } from "@libp2p/peer-id";
 import { multiaddr, Multiaddr } from "@multiformats/multiaddr";
 import { err, ok, Result } from "neverthrow";
 import { TypedEmitter } from "tiny-typed-emitter";
-import { logger, messageTypeToName } from "../../utils/logger.js";
+import { logger, messageTypeToName, Tags } from "../../utils/logger.js";
 import { PeriodicPeerCheckScheduler } from "./periodicPeerCheck.js";
 import { GOSSIP_PROTOCOL_VERSION } from "./protocol.js";
 import { AddrInfo } from "@chainsafe/libp2p-gossipsub/types";
-import { PeerScoreThresholds } from "@chainsafe/libp2p-gossipsub/score";
-import { statsd, StatsDInitParams } from "../../utils/statsd.js";
+import { PeerScoreParams, PeerScoreThresholds } from "@chainsafe/libp2p-gossipsub/score";
+import { statsd } from "../../utils/statsd.js";
+import { ClientOptions } from "@figma/hot-shots";
 import { createFromProtobuf, exportToProtobuf } from "@libp2p/peer-id-factory";
 import EventEmitter from "events";
 import RocksDB from "../../storage/db/rocksdb.js";
 import { RootPrefix } from "../../storage/db/types.js";
 import { sleep } from "../../utils/crypto.js";
+import { GossipsubMessage } from "@chainsafe/libp2p-gossipsub";
 
 /** The maximum number of pending merge messages before we drop new incoming gossip or sync messages. */
-export const MAX_MESSAGE_QUEUE_SIZE = 100_000;
+export const MAX_SYNCTRIE_QUEUE_SIZE = 100_000;
 /** The TTL for messages in the seen cache */
-export const GOSSIP_SEEN_TTL = 1000 * 60 * 5;
+export const GOSSIP_SEEN_TTL = 1000 * 60 * 5; // 5 minutes
 
 /** The maximum amount of time to dial a peer in libp2p network in milliseconds */
 export const LIBP2P_CONNECT_TIMEOUT_MS = 2000;
@@ -48,6 +58,8 @@ interface NodeEvents {
   peerConnect: (connection: Connection) => void;
   /** Triggers when a peer disconnects and includes the libp2p Connection object */
   peerDisconnect: (connection: Connection) => void;
+  /** Triggers when a peer is discovered and includes the libp2p PeerInfo object */
+  peerDiscovery: (peerInfo: PeerInfo) => void;
 }
 
 /** Optional arguments provided when creating a Farcaster Gossip Node */
@@ -65,7 +77,7 @@ export interface NodeOptions {
   /** A list of peerIds that are not allowed to connect to this node */
   deniedPeerIdStrs?: string[] | undefined;
   /** A list of addresses the node directly peers with, provided in MultiAddr format */
-  directPeers?: AddrInfo[] | undefined;
+  directPeers?: string[] | undefined;
   /** Override peer scoring. Useful for tests */
   scoreThresholds?: Partial<PeerScoreThresholds>;
   /** A list of PeerIds that will bypass application-specific peer scoring and return the cap. */
@@ -79,8 +91,14 @@ export interface NodeOptions {
   /** The maximum amount of time to dial a peer in libp2p network in milliseconds */
   p2pConnectTimeoutMs?: number | undefined;
   /** StatsD parameters */
-  statsdParams?: StatsDInitParams | undefined;
+  statsdParams?: ClientOptions | undefined;
+  /** Override score params. Useful for tests */
+  scoreParams?: Partial<PeerScoreParams> | undefined;
 }
+
+export type GossipMessageResult = {
+  bundled: boolean;
+} & PublishResult;
 
 // A common return type for several methods on the libp2p node.
 // Includes a success flag, an error message and an optional error type
@@ -108,7 +126,11 @@ export interface LibP2PNodeInterface {
   updateAllowedPeerIds: (peerIds: string[] | undefined) => Promise<void>;
   updateDeniedPeerIds: (peerIds: string[]) => Promise<void>;
   subscribe: (topic: string) => Promise<void>;
-  gossipMessage: (message: Uint8Array) => Promise<SuccessOrError & { peerIds: Uint8Array[] }>;
+  broadcastMessage: (message: Uint8Array) => Promise<SuccessOrError & { peerIds: Uint8Array[] }>;
+  gossipMessage: (
+    message: Uint8Array,
+  ) => Promise<SuccessOrError & { bundled: boolean | undefined; peerIds: Uint8Array[] }>;
+  gossipBundle: (messages: Uint8Array) => Promise<SuccessOrError & { peerIds: Uint8Array[] }>;
   gossipContactInfo: (contactInfo: Uint8Array) => Promise<SuccessOrError & { peerIds: Uint8Array[] }>;
   reportValid: (messageId: string, propagationSource: Uint8Array, isValid: boolean) => Promise<void>;
   updateApplicationPeerScore: (peerId: string, score: number) => Promise<void>;
@@ -245,7 +267,7 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
   async putPeerAddrToDB(peerIdStr: string, addr: string) {
     if (this._db) {
       await this._db.put(this.makePeerKey(peerIdStr), Buffer.from(addr));
-      log.info({ peerId: peerIdStr, addr }, "Added peer to DB");
+      log.info(new Tags({ addr, peerId: peerIdStr }), "Added peer to DB");
     }
   }
 
@@ -280,9 +302,9 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
       const peerAddr = multiaddr(addr);
       const result = await this.connectAddress(peerAddr);
       if (result.isOk()) {
-        log.info({ peerIdStr, addr }, "Connected to peer from DB");
+        log.info(new Tags({ addr, peerId: peerIdStr }), "Connected to peer from DB");
       } else {
-        log.error({ peerIdStr, addr, error: result.error }, "Failed to connect to peer from DB");
+        log.debug(new Tags({ addr, error: result.error, peerId: peerIdStr }), "Failed to connect to peer from DB");
       }
 
       // Sleep for a bit to avoid overwhelming the network
@@ -300,13 +322,17 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
     return this._multiaddrs ?? [];
   }
 
-  /** Returs the node's network */
+  /** Returns the node's network */
   get network() {
     return this._network;
   }
 
   async addPeerToAddressBook(peerId: PeerId, multiaddr: Multiaddr) {
-    await this.callMethod("addToAddressBook", exportToProtobuf(peerId), multiaddr.bytes);
+    await this.callMethod(
+      "addToAddressBook",
+      exportToProtobuf(peerId as RSAPeerId | Ed25519PeerId | Secp256k1PeerId),
+      multiaddr.bytes,
+    );
   }
 
   async peerStoreCount(): Promise<number> {
@@ -315,18 +341,24 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
 
   /** Removes the peer from the address book and hangs up on them */
   async removePeerFromAddressBook(peerId: PeerId) {
-    await this.callMethod("removeFromAddressBook", exportToProtobuf(peerId));
+    await this.callMethod(
+      "removeFromAddressBook",
+      exportToProtobuf(peerId as RSAPeerId | Ed25519PeerId | Secp256k1PeerId),
+    );
   }
 
   /** Returns the libp2p Peer instance after updating the connections in the AddressBook */
   async getPeerAddresses(peerId: PeerId): Promise<Multiaddr[]> {
-    return (await this.callMethod("getPeerAddresses", exportToProtobuf(peerId))).map((addr: Uint8Array) =>
-      multiaddr(addr),
-    );
+    return (
+      await this.callMethod("getPeerAddresses", exportToProtobuf(peerId as RSAPeerId | Ed25519PeerId | Secp256k1PeerId))
+    ).map((addr: Uint8Array) => multiaddr(addr));
   }
 
   async isPeerAllowed(peerId: PeerId) {
-    return await this.callMethod("isPeerAllowed", exportToProtobuf(peerId));
+    return await this.callMethod(
+      "isPeerAllowed",
+      exportToProtobuf(peerId as RSAPeerId | Ed25519PeerId | Secp256k1PeerId),
+    );
   }
 
   /**
@@ -390,9 +422,48 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
     return this._peerId?.toString();
   }
 
-  /** Serializes and publishes a Farcaster Message to the network */
-  async gossipMessage(message: Message): Promise<HubResult<PublishResult>> {
+  /** Serializes and publishes a Farcaster Message to the network. This message is gossiped individually
+   *  (i.e., not in a bundle). Do not use this method at scale, since it will cause a lot of traffic
+   *  on the network.
+   *
+   *  Prefer using `gossipMessage` or `gossipBundle` instead.
+   */
+  async broadcastMessage(message: Message): HubAsyncResult<PublishResult> {
+    const result = await this.callMethod("broadcastMessage", Message.encode(message).finish());
+    if (result.success) {
+      const peerIds = await Promise.all(
+        result.peerIds.map(async (peerId: Uint8Array) => await createFromProtobuf(peerId)),
+      );
+      return ok({ recipients: peerIds });
+    } else {
+      return err(new HubError(result.errorType as HubErrorCode, result.errorMessage as string));
+    }
+  }
+
+  /** Serializes and publishes a Farcaster Message to the network. This message may not be immediately
+   *  sent to the gossip network as it may instead be bundled with other messages and sent as a bundle.
+   *
+   *  If you need to broadcast an individual message, use `broadcastMessage` instead.
+   */
+  async gossipMessage(message: Message): HubAsyncResult<GossipMessageResult> {
     const result = await this.callMethod("gossipMessage", Message.encode(message).finish());
+    if (result.success) {
+      const peerIds = await Promise.all(
+        result.peerIds.map(async (peerId: Uint8Array) => await createFromProtobuf(peerId)),
+      );
+
+      return ok({
+        bundled: result.bundled ?? false,
+        recipients: peerIds,
+      });
+    } else {
+      return err(new HubError(result.errorType as HubErrorCode, result.errorMessage as string));
+    }
+  }
+
+  /** Serializes and publishes a bundle to the network */
+  async gossipBundle(messageBundle: MessageBundle): HubAsyncResult<PublishResult> {
+    const result = await this.callMethod("gossipBundle", MessageBundle.encode(messageBundle).finish());
     if (result.success) {
       const peerIds = await Promise.all(
         result.peerIds.map(async (peerId: Uint8Array) => await createFromProtobuf(peerId)),
@@ -416,10 +487,10 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
     }
   }
 
-  /** Connects to a peer GossipNode */
+  /** Connects to a peer GossipNode through at least one multiaddr */
   async connect(peerNode: GossipNode): Promise<HubResult<void>> {
     const multiaddrs = peerNode.multiaddrs();
-    if (!multiaddrs || multiaddr.length === 0) {
+    if (!multiaddrs || multiaddrs.length === 0) {
       return err(new HubError("unavailable", { message: "no peer id" }));
     }
 
@@ -439,6 +510,7 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
     if (result.success) {
       return ok(undefined);
     } else {
+      log.error(`Failed to connect to address: ${result.errorMessage}`);
       return err(new HubError("unavailable", result.errorMessage as string));
     }
   }
@@ -471,14 +543,14 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
   }
 
   async registerListeners() {
-    this._nodeEvents?.addListener("peer:connect", (detail) => {
+    this._nodeEvents?.addListener("connection:open", (detail: Connection) => {
       // console.log("Peer Connected", JSON.stringify(detail, null, 2));
       log.info(
-        {
-          peer: detail.remotePeer,
+        new Tags({
           addrs: detail.remoteAddr,
-          type: detail.stat.direction,
-        },
+          type: detail.direction,
+          peerId: detail.remotePeer.toString(),
+        }),
         "P2P Connection established",
       );
       this.emit("peerConnect", detail);
@@ -488,15 +560,15 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
       // if we restart
       this.putPeerAddrToDB(detail.remotePeer.toString(), detail.remoteAddr.toString());
     });
-    this._nodeEvents?.addListener("peer:disconnect", (detail) => {
-      log.info({ peer: detail.remotePeer }, "P2P Connection disconnected");
+    this._nodeEvents?.addListener("connection:close", (detail: Connection) => {
+      log.info(new Tags({ peerId: detail.remotePeer.toString() }), "P2P Connection disconnected");
       this.emit("peerDisconnect", detail);
       this.updateStatsdPeerGauges();
     });
     this._nodeEvents?.addListener("peer:discovery", (detail) => {
-      log.info({ peer: detail }, "Discovered peer");
+      log.info(new Tags({ peerId: detail.remotePeer?.toString() }), "Discovered peer");
     });
-    this._nodeEvents?.addListener("gossipsub:message", (detail) => {
+    this._nodeEvents?.addListener("gossipsub:message", (detail: GossipsubMessage) => {
       log.debug({
         identity: this.identity,
         gossipMessageId: detail.msgId,
@@ -510,11 +582,16 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
       if (this.gossipTopics().includes(detail.msg.topic)) {
         try {
           let data: Buffer;
-          if (detail.msg.data.type === "Buffer") {
-            data = Buffer.from(detail.msg.data.data);
+          // some kind of serialization quirk?
+          // biome-ignore lint/suspicious/noExplicitAny: legacy code, avoid using ignore for new code
+          if ((detail.msg.data as any).type === "Buffer") {
+            // biome-ignore lint/suspicious/noExplicitAny: legacy code, avoid using ignore for new code
+            data = Buffer.from((detail.msg.data as any).data);
           } else {
             data = Buffer.from(Object.values(detail.msg.data as unknown as Record<string, number>));
           }
+
+          statsd().gauge("gossip.message_size_bytes", data.length, { topic: detail.msg.topic });
 
           const tags: { [key: string]: string } = {
             topic: detail.msg.topic,
@@ -538,15 +615,15 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
 
   registerDebugListeners() {
     this._nodeEvents?.addListener("peer:discovery", (detail) => {
-      log.info({ identity: this.identity }, `Found peer: ${detail.multiaddrs}  }`);
+      log.info({ identity: this.identity }, `Found peer: ${detail.multiaddrs}`);
     });
-    this._nodeEvents?.addListener("peer:connect", (detail) => {
+    this._nodeEvents?.addListener("connection:open", (detail: Connection) => {
       log.info({ identity: this.identity }, `Connection established to: ${detail.remotePeer.toString()}`);
     });
-    this._nodeEvents?.addListener("peer:disconnect", (detail) => {
+    this._nodeEvents?.addListener("connection:close", (detail: Connection) => {
       log.info({ identity: this.identity }, `Disconnected from: ${detail.remotePeer.toString()} `);
     });
-    this._nodeEvents?.addListener("message", (detail) => {
+    this._nodeEvents?.addListener("message", (detail: GossipSubMessage) => {
       log.info(
         // biome-ignore lint/suspicious/noExplicitAny: legacy code, avoid using ignore for new code
         { identity: this.identity, from: (detail as any)["from"] },

@@ -1,6 +1,6 @@
 import { faker } from "@faker-js/faker";
 import * as protobufs from "./protobufs";
-import { Protocol } from "./protobufs";
+import { CastType, Protocol } from "./protobufs";
 import { err, ok } from "neverthrow";
 import { bytesToUtf8String, utf8StringToBytes } from "./bytes";
 import { HubError } from "./errors";
@@ -59,7 +59,7 @@ describe("validateFname", () => {
     expect(validations.validateFname(fname)).toEqual(ok(fname));
   });
 
-  test("succeeds with valid string inpt", () => {
+  test("succeeds with valid string input", () => {
     const fname = bytesToUtf8String(Factories.Fname.build())._unsafeUnwrap();
     expect(validations.validateFname(fname)).toEqual(ok(fname));
   });
@@ -95,6 +95,18 @@ describe("validateFname", () => {
     const fname = "fname.eth";
     expect(validations.validateFname(fname)).toEqual(
       err(new HubError("bad_request.validation_failure", `fname "${fname}" doesn't match ${validations.FNAME_REGEX}`)),
+    );
+  });
+});
+
+describe("validateFarcasterTime", () => {
+  test("zero is a valid time", () => {
+    expect(validations.validateFarcasterTime(0).isOk()).toBeTruthy();
+  });
+
+  test("millisecond precision time is rejected", () => {
+    expect(validations.validateFarcasterTime(1724120917791)).toEqual(
+      err(new HubError("bad_request.invalid_param", "time too far in future")),
     );
   });
 });
@@ -284,6 +296,43 @@ describe("validateCastAddBody", () => {
       mentionsPositions: [6, 6],
     });
     expect(validations.validateCastAddBody(body)).toEqual(ok(body));
+  });
+
+  describe("long casts", () => {
+    test("succeeds with 1024 ASCII characters", () => {
+      const body = Factories.CastAddBody.build({
+        text: faker.random.alphaNumeric(1024),
+        type: CastType.LONG_CAST,
+      });
+      expect(validations.validateCastAddBody(body)).toEqual(ok(body));
+    });
+    test("fails with 1025 ASCII characters", () => {
+      const body = Factories.CastAddBody.build({
+        text: faker.random.alphaNumeric(1025),
+        type: CastType.LONG_CAST,
+      });
+      expect(validations.validateCastAddBody(body)).toEqual(
+        err(new HubError("bad_request.validation_failure", "text > 1024 bytes for long cast")),
+      );
+    });
+    test("fails with less than 320 ASCII characters", () => {
+      const body = Factories.CastAddBody.build({
+        text: "Hello",
+        type: CastType.LONG_CAST,
+      });
+      expect(validations.validateCastAddBody(body)).toEqual(
+        err(new HubError("bad_request.validation_failure", "text too short for long cast")),
+      );
+    });
+    test("fails with unrecognized type", () => {
+      const body = Factories.CastAddBody.build({
+        text: "Hello",
+        type: 2,
+      });
+      expect(validations.validateCastAddBody(body)).toEqual(
+        err(new HubError("bad_request.validation_failure", "invalid cast type")),
+      );
+    });
   });
 
   describe("when string embeds are allowed", () => {
@@ -841,15 +890,15 @@ describe("validateVerificationAddEthAddressSignature", () => {
     expect(result).toEqual(err(new HubError("bad_request.invalid_param", "RPC client not provided for chainId 1")));
   });
 
-  test("fails if ethSignature is > 256 bytes", async () => {
+  test("fails if ethSignature is > 2048 bytes", async () => {
     const body = await Factories.VerificationAddAddressBody.create(
       {
-        claimSignature: Factories.Bytes.build({}, { transient: { length: 257 } }),
+        claimSignature: Factories.Bytes.build({}, { transient: { length: 2049 } }),
       },
       { transient: { protocol: Protocol.ETHEREUM } },
     );
     const result = await validations.validateVerificationAddEthAddressSignature(body, fid, network, {});
-    expect(result).toEqual(err(new HubError("bad_request.validation_failure", "claimSignature > 256 bytes")));
+    expect(result).toEqual(err(new HubError("bad_request.validation_failure", "claimSignature > 2048 bytes")));
   });
 
   test("succeeds for contract signatures", async () => {
@@ -993,6 +1042,30 @@ describe("validateUserDataAddBody", () => {
     expect(validations.validateUserDataAddBody(body)).toEqual(ok(body));
   });
 
+  test("succeeds for empty location", async () => {
+    const body = Factories.UserDataBody.build({
+      type: UserDataType.LOCATION,
+      value: "",
+    });
+    expect(validations.validateUserDataAddBody(body)).toEqual(ok(body));
+  });
+
+  test("succeeds for valid location: negative longitude", async () => {
+    const body = Factories.UserDataBody.build({
+      type: UserDataType.LOCATION,
+      value: "geo:12.34,-123.45",
+    });
+    expect(validations.validateUserDataAddBody(body)).toEqual(ok(body));
+  });
+
+  test("succeeds for valid location: negative latitude", async () => {
+    const body = Factories.UserDataBody.build({
+      type: UserDataType.LOCATION,
+      value: "geo:-12.34,123.45",
+    });
+    expect(validations.validateUserDataAddBody(body)).toEqual(ok(body));
+  });
+
   describe("fails", () => {
     let body: protobufs.UserDataBody;
     let hubErrorMessage: string;
@@ -1033,6 +1106,153 @@ describe("validateUserDataAddBody", () => {
         value: faker.random.alphaNumeric(257),
       });
       hubErrorMessage = "url value > 256";
+    });
+
+    test("when latitude is too low", () => {
+      body = Factories.UserDataBody.build({
+        type: protobufs.UserDataType.LOCATION,
+        value: "geo:-90.01,12.34",
+      });
+      hubErrorMessage = "Latitude value outside valid range";
+    });
+
+    test("when latitude is too high", () => {
+      body = Factories.UserDataBody.build({
+        type: protobufs.UserDataType.LOCATION,
+        value: "geo:90.01,12.34",
+      });
+      hubErrorMessage = "Latitude value outside valid range";
+    });
+
+    test("when longitude is too low", () => {
+      body = Factories.UserDataBody.build({
+        type: protobufs.UserDataType.LOCATION,
+        value: "geo:12.34,-180.01",
+      });
+      hubErrorMessage = "Longitude value outside valid range";
+    });
+
+    test("when longitude is too high", () => {
+      body = Factories.UserDataBody.build({
+        type: protobufs.UserDataType.LOCATION,
+        value: "geo:12.34,180.01",
+      });
+      hubErrorMessage = "Longitude value outside valid range";
+    });
+
+    test("when latitude has too much precision", () => {
+      body = Factories.UserDataBody.build({
+        type: protobufs.UserDataType.LOCATION,
+        value: "geo:12.345,12.34",
+      });
+      hubErrorMessage = "Invalid location string";
+    });
+
+    test("when latitude has insufficient precision", () => {
+      body = Factories.UserDataBody.build({
+        type: protobufs.UserDataType.LOCATION,
+        value: "geo:12,12.34",
+      });
+      hubErrorMessage = "Invalid location string";
+    });
+
+    test("when longitude has too much precision", () => {
+      body = Factories.UserDataBody.build({
+        type: protobufs.UserDataType.LOCATION,
+        value: "geo:12.34,12.345",
+      });
+      hubErrorMessage = "Invalid location string";
+    });
+
+    test("when longitude has insufficient precision", () => {
+      body = Factories.UserDataBody.build({
+        type: protobufs.UserDataType.LOCATION,
+        value: "geo:12.34,12",
+      });
+      hubErrorMessage = "Invalid location string";
+    });
+
+    test("when latitude is an invalid number", () => {
+      body = Factories.UserDataBody.build({
+        type: protobufs.UserDataType.LOCATION,
+        value: "geo:xx,12.34",
+      });
+      hubErrorMessage = "Invalid location string";
+    });
+
+    test("when longitude is an invalid number", () => {
+      body = Factories.UserDataBody.build({
+        type: protobufs.UserDataType.LOCATION,
+        value: "geo:12.34,xx",
+      });
+      hubErrorMessage = "Invalid location string";
+    });
+
+    test("when location is missing geo prefix", () => {
+      body = Factories.UserDataBody.build({
+        type: protobufs.UserDataType.LOCATION,
+        value: "12.34,12.34",
+      });
+      hubErrorMessage = "Invalid location string";
+    });
+
+    test("when location is missing both coordinates", () => {
+      body = Factories.UserDataBody.build({
+        type: protobufs.UserDataType.LOCATION,
+        value: "geo:",
+      });
+      hubErrorMessage = "Invalid location string";
+    });
+
+    test("when location is missing a coordinate", () => {
+      body = Factories.UserDataBody.build({
+        type: protobufs.UserDataType.LOCATION,
+        value: "geo:12.34,",
+      });
+      hubErrorMessage = "Invalid location string";
+    });
+
+    test("when location contains a space", () => {
+      body = Factories.UserDataBody.build({
+        type: protobufs.UserDataType.LOCATION,
+        value: "geo:12.34, 12.34",
+      });
+      hubErrorMessage = "Invalid location string";
+    });
+
+    test("succeeds for twitter usernames", async () => {
+      const body = Factories.UserDataBody.build({
+        type: UserDataType.TWITTER,
+        value: "dwr",
+      });
+      expect(validations.validateUserDataAddBody(body)).toEqual(ok(body));
+    });
+
+    test("fails for invalid twitter usernames", async () => {
+      const body1 = Factories.UserDataBody.build({
+        type: UserDataType.TWITTER,
+        value: "-wrong-info",
+      });
+      expect(validations.validateUserDataAddBody(body1)).toEqual(
+        err(
+          new HubError(
+            "bad_request.validation_failure",
+            `username "-wrong-info" doesn't match ${validations.TWITTER_REGEX}`,
+          ),
+        ),
+      );
+      const body2 = Factories.UserDataBody.build({
+        type: UserDataType.TWITTER,
+        value: "too_many_characters_for_a_username",
+      });
+      expect(validations.validateUserDataAddBody(body2)).toEqual(
+        err(
+          new HubError(
+            "bad_request.validation_failure",
+            `username "too_many_characters_for_a_username" > 15 characters`,
+          ),
+        ),
+      );
     });
   });
 });
@@ -1122,7 +1342,9 @@ describe("validateMessage", () => {
     });
 
     const result = await validations.validateMessage(message);
-    expect(result).toEqual(err(new HubError("bad_request.validation_failure", "invalid hash")));
+    expect(result.isErr()).toBeTruthy();
+    expect(result._unsafeUnwrapErr().errCode).toEqual("bad_request.validation_failure");
+    expect(result._unsafeUnwrapErr().message).toContain("invalid hash");
   });
 
   test("fails with invalid hash and data_bytes", async () => {
@@ -1133,7 +1355,9 @@ describe("validateMessage", () => {
     message.dataBytes = protobufs.MessageData.encode(message.data!).finish();
 
     const result = await validations.validateMessage(message);
-    expect(result).toEqual(err(new HubError("bad_request.validation_failure", "invalid hash")));
+    expect(result.isErr()).toBeTruthy();
+    expect(result._unsafeUnwrapErr().errCode).toEqual("bad_request.validation_failure");
+    expect(result._unsafeUnwrapErr().message).toContain("invalid hash");
   });
 
   test("fails with invalid signatureScheme", async () => {
@@ -1148,7 +1372,7 @@ describe("validateMessage", () => {
   test("fails with invalid signature", async () => {
     const message = await Factories.Message.create({
       signature: Factories.Ed25519Signature.build(),
-      signer: Factories.Ed25519PPublicKey.build(),
+      signer: Factories.Ed25519PublicKey.build(),
     });
 
     const result = await validations.validateMessage(message);
@@ -1158,7 +1382,7 @@ describe("validateMessage", () => {
   test("fails with invalid signature data", async () => {
     const message = await Factories.Message.create({
       signature: Factories.Bytes.build({}, { transient: { length: 0 } }),
-      signer: Factories.Ed25519PPublicKey.build(),
+      signer: Factories.Ed25519PublicKey.build(),
     });
 
     const result = await validations.validateMessage(message);
@@ -1260,7 +1484,7 @@ describe("validateFrameActionBody", () => {
   });
   test("fails when url is too long", async () => {
     const body = Factories.FrameActionBody.build({
-      url: Buffer.from(faker.datatype.string(257)),
+      url: Buffer.from(faker.datatype.string(1025)),
     });
     const result = validations.validateFrameActionBody(body);
     expect(result._unsafeUnwrapErr().message).toMatch("invalid url");
@@ -1292,5 +1516,35 @@ describe("validateFrameActionBody", () => {
     });
     const result = validations.validateFrameActionBody(body);
     expect(result._unsafeUnwrapErr().message).toMatch("invalid address");
+  });
+});
+
+describe("validateSingleBody", () => {
+  test("succeeds", async () => {
+    // Create a message with 2 bodies (reactionBody and linkBody)
+    const msg = protobufs.Message.create({
+      data: {
+        type: protobufs.MessageType.REACTION_ADD,
+        fid: 2,
+        timestamp: 101489960,
+        network: 1,
+        reactionBody: {
+          type: protobufs.ReactionType.LIKE,
+          targetCastId: {
+            fid: 3,
+            hash: new Uint8Array(),
+          },
+        },
+        linkBody: {
+          type: "follow",
+          displayTimestamp: 1768551184,
+          targetFid: 4,
+        },
+      },
+    });
+
+    const result = await validations.validateMessage(msg);
+    expect(result.isErr()).toBeTruthy();
+    expect(result._unsafeUnwrapErr().message).toMatch("only one body can be set");
   });
 });

@@ -82,19 +82,28 @@ service HubService {
   // The Bulk methods don't have corresponding HTTP API endpoints because the 
   // regular endpoints can be used to get all the messages
   // @http-api: none
-  rpc GetAllCastMessagesByFid(FidRequest) returns (MessagesResponse);
+  rpc GetAllCastMessagesByFid(FidTimestampRequest) returns (MessagesResponse);
   // @http-api: none
-  rpc GetAllReactionMessagesByFid(FidRequest) returns (MessagesResponse);
+  rpc GetAllReactionMessagesByFid(FidTimestampRequest) returns (MessagesResponse);
   // @http-api: none
-  rpc GetAllVerificationMessagesByFid(FidRequest) returns (MessagesResponse);
+  rpc GetAllVerificationMessagesByFid(FidTimestampRequest) returns (MessagesResponse);
   // @http-api: none
-  rpc GetAllUserDataMessagesByFid(FidRequest) returns (MessagesResponse);
+  rpc GetAllUserDataMessagesByFid(FidTimestampRequest) returns (MessagesResponse);
   // @http-api: none
-  rpc GetAllLinkMessagesByFid(FidRequest) returns (MessagesResponse);
+  rpc GetAllLinkMessagesByFid(FidTimestampRequest) returns (MessagesResponse);
+  // @http-api: none
+  rpc GetLinkCompactStateMessageByFid(FidRequest) returns (MessagesResponse);
+  // @http-api: none
+  rpc SubmitBulkMessages(SubmitBulkMessagesRequest) returns (SubmitBulkMessagesResponse);
 
-  // Sync Methods    
+  // Sync Methods
   rpc GetInfo(HubInfoRequest) returns (HubInfoResponse);
   rpc GetCurrentPeers(Empty) returns (ContactInfoResponse);
+  // @http-api: none
+  rpc StopSync(Empty) returns (SyncStatusResponse);
+  // This is experimental, do not rely on this endpoint existing in the future
+  // @http-api: none
+  rpc ForceSync(SyncStatusRequest) returns (SyncStatusResponse);
   // @http-api: none
   rpc GetSyncStatus(SyncStatusRequest) returns (SyncStatusResponse);
   // @http-api: none
@@ -104,7 +113,11 @@ service HubService {
   // @http-api: none
   rpc GetSyncMetadataByPrefix(TrieNodePrefix) returns (TrieNodeMetadataResponse);
   // @http-api: none
-  rpc GetSyncSnapshotByPrefix(TrieNodePrefix) returns (TrieNodeSnapshotResponse);  
+  rpc GetSyncSnapshotByPrefix(TrieNodePrefix) returns (TrieNodeSnapshotResponse);
+  // @http-api: none
+  rpc StreamSync(stream StreamSyncRequest) returns (stream StreamSyncResponse);
+  // @http-api: none
+  rpc StreamFetch(stream StreamFetchRequest) returns (stream StreamFetchResponse);
 }
 
 service AdminService {

@@ -5,7 +5,7 @@
 # itself in the process.
 
 # Define the version of this script
-CURRENT_VERSION="4"
+CURRENT_VERSION="5"
 
 REPO="farcasterxyz/hub-monorepo"
 RAWFILE_BASE="https://raw.githubusercontent.com/$REPO"
@@ -15,7 +15,6 @@ DOCKER_COMPOSE_FILE_PATH="apps/hubble/docker-compose.yml"
 SCRIPT_FILE_PATH="scripts/hubble.sh"
 GRAFANA_DASHBOARD_JSON_PATH="apps/hubble/grafana/grafana-dashboard.json"
 GRAFANA_INI_PATH="apps/hubble/grafana/grafana.ini"
-ENVOY_CONFIG_PATH="apps/hubble/envoy/envoy.yaml"
 
 install_jq() {
     if command -v jq >/dev/null 2>&1; then
@@ -66,7 +65,7 @@ install_jq() {
 # Fetch file from repo at "@latest"
 fetch_file_from_repo() {
     local file_path="$1"
-    local local_filename="$2"    
+    local local_filename="$2"
 
     local download_url
     download_url="$RAWFILE_BASE/$LATEST_TAG/$file_path?t=$(date +%s)"
@@ -85,6 +84,7 @@ self_upgrade() {
     fi
 
     local tmp_file
+    trap 'rm -f "$tmp_file"' EXIT
     tmp_file=$(mktemp)
     fetch_file_from_repo "$SCRIPT_FILE_PATH" "$tmp_file"
 
@@ -113,15 +113,91 @@ self_upgrade() {
 }
 
 # Fetch the docker-compose.yml and grafana-dashboard.json files
-fetch_latest_docker_compose_and_dashboard() {    
-    fetch_file_from_repo "$DOCKER_COMPOSE_FILE_PATH" "docker-compose.yml" 
+fetch_latest_docker_compose_and_dashboard() {
+    fetch_file_from_repo "$DOCKER_COMPOSE_FILE_PATH" "docker-compose.yml"
     fetch_file_from_repo "$GRAFANA_DASHBOARD_JSON_PATH" "grafana-dashboard.json"
     mkdir -p grafana
     chmod 777 grafana
     fetch_file_from_repo "$GRAFANA_INI_PATH" "grafana/grafana.ini"
-    mkdir -p envoy
-    chmod 777 envoy
-    fetch_file_from_repo "$ENVOY_CONFIG_PATH" "envoy/envoy.yaml"
+}
+
+# Prompt for hub operator agreement
+prompt_for_hub_operator_agreement() {
+    env_file=".env"
+
+    update_env_file() {
+        key="AGREE_NO_REWARDS_FOR_ME"
+        value="true"
+        temp_file="${env_file}.tmp"
+
+        if [ -f "$env_file" ]; then
+            # File exists, update or append
+            updated=0
+            while IFS= read -r line || [ -n "$line" ]; do
+                if [ "${line%%=*}" = "$key" ]; then
+                    echo "$key=$value" >>"$temp_file"
+                    updated=1
+                else
+                    echo "$line" >>"$temp_file"
+                fi
+            done <"$env_file"
+
+            if [ $updated -eq 0 ]; then
+                echo "$key=$value" >>"$temp_file"
+            fi
+
+            mv "$temp_file" "$env_file"
+        else
+            # File doesn't exist, create it
+            echo "$key=$value" >"$env_file"
+        fi
+    }
+
+    prompt_agreement() {
+        tried=0
+        while true; do
+            printf "⚠️  IMPORTANT: You will NOT get any rewards for running this hub\n"
+            printf "> Please type \"Yes\" to continue: "
+            read -r response
+            case $(printf "%s" "$response" | tr '[:upper:]' '[:lower:]') in
+            yes | y)
+                printf "✅ You have agreed to the terms of service. Proceeding...\n"
+                update_env_file
+                return 0
+                ;;
+            *)
+                tried=$((tried + 1))
+                if [ $tried -gt 10 ]; then
+                    printf "❌ You have not agreed to the terms of service. Please run script again manually to agree and continue.\n"
+                    return 1
+                fi
+                printf "[i] Incorrect input. Please try again.\n"
+                ;;
+            esac
+        done
+    }
+
+    if grep -q "AGREE_NO_REWARDS_FOR_ME=true" "$env_file"; then
+        printf "✅ You have agreed to the terms of service. Proceeding...\n"
+        return 0
+    else
+        # Check if stdin is a terminal
+        if [ -t 0 ]; then
+            prompt_agreement
+            return $?
+        fi
+
+        # If we've reached this point, shut down existing services since agreement is required
+
+        # Setup the docker-compose command
+        set_compose_command
+
+        # Run docker compose down
+        $COMPOSE_CMD down
+        printf "❌ You have not agreed to the terms of service. Please run script again manually to agree and continue.\n"
+
+        return 1
+    fi
 }
 
 validate_and_store() {
@@ -163,7 +239,7 @@ store_operator_fid_env() {
     fi
 
     if [ "$response" != "null" ] && [ "$response" != "" ]; then
-        echo "HUB_OPERATOR_FID=$response" >> .env        
+        echo "HUB_OPERATOR_FID=$response" >> .env
     else
         echo "Not a valid FID or username. Not updating HUB_OPERATOR_FID."
         echo "HUB_OPERATOR_FID=0" >> .env
@@ -282,10 +358,10 @@ setup_grafana() {
         fi
     fi
 
-    # Step 4: Import the dashboard. The API takes a slighly different format than the JSON import
+    # Step 4: Import the dashboard. The API takes a slightly different format than the JSON import
     # in the UI, so we need to convert the JSON file first.
     jq '{dashboard: (del(.id) | . + {id: null}), folderId: 0, overwrite: true}' "grafana-dashboard.json" > "grafana-dashboard.api.json"
-    
+
     response=$(curl -s -X "POST" "$grafana_url/api/dashboards/db" \
         -u "$credentials" \
         -H "Content-Type: application/json" \
@@ -305,7 +381,7 @@ setup_grafana() {
 
         echo "✅ Dashboard is installed."
     else
-        echo "Failed to install dashboard. Exiting."
+        echo "Failed to install the dashboard. Exiting."
         echo "$response"
         return 1
     fi
@@ -331,8 +407,8 @@ install_docker() {
     # Add current user to the docker group
     sudo usermod -aG docker $(whoami)
 
-    echo "✅ Docker is installed"   
-    return 0 
+    echo "✅ Docker is installed"
+    return 0
 }
 
 setup_identity() {
@@ -360,6 +436,12 @@ setup_crontab() {
         exit 1
     fi
 
+    # skip installing crontab if SKIP_CRONTAB is set to anything in the .env
+    if key_exists "SKIP_CRONTAB"; then
+        echo "✅ SKIP_CRONTAB exists in .env. Skipping crontab setup."
+        return 0
+    fi
+
     # If the crontab was installed for the current user (instead of root) then
     # remove it
     if [[ "$(uname)" == "Linux" ]]; then
@@ -380,10 +462,10 @@ setup_crontab() {
       # Fix buggy crontab entry which would run every minute
       if $CRONTAB_CMD -l 2>/dev/null | grep "hubble.sh" | grep -q "^\*"; then
         echo "Removing crontab for upgrade"
-  
+
         # Export the existing crontab entries to a temporary file in /tmp/
         crontab -l > /tmp/temp_cron.txt
-  
+
         # Remove the line containing "hubble.sh" from the temporary file
         sed -i '/hubble\.sh/d' /tmp/temp_cron.txt
         crontab /tmp/temp_cron.txt
@@ -491,6 +573,9 @@ reexec_as_root_if_needed() {
 # Call the function at the beginning of your script
 reexec_as_root_if_needed "$@"
 
+# Prompt for hub operator agreement
+prompt_for_hub_operator_agreement || exit $?
+
 # Check for the "up" command-line argument
 if [ "$1" == "up" ]; then
    # Setup the docker-compose command
@@ -521,7 +606,7 @@ if [ "$1" == "down" ]; then
 fi
 
 # Check the command-line argument for 'upgrade'
-if [ "$1" == "upgrade" ]; then    
+if [ "$1" == "upgrade" ]; then
     # Ensure the ~/hubble directory exists
     if [ ! -d ~/hubble ]; then
         mkdir -p ~/hubble || { echo "Failed to create ~/hubble directory."; exit 1; }
@@ -557,7 +642,7 @@ if [ "$1" == "upgrade" ]; then
     # Start the hubble service
     start_hubble
 
-    echo "✅ Upgrade complete."    
+    echo "✅ Upgrade complete."
     echo ""
     echo "Monitor your node at http://localhost:3000/"
 
@@ -579,7 +664,7 @@ fi
 
 if [ "$1" == "autoupgrade" ]; then
     # Autoupgrade cronjob needs the correct $PATH entries
-    if [[ ! -f "~/.bashrc" ]]; then
+    if [[ ! -f ~/.bashrc ]]; then
       source ~/.bashrc
     fi
 
@@ -614,5 +699,11 @@ if [ $# -eq 0 ] || [ "$1" == "help" ]; then
     echo "  up       Start Hubble and Grafana dashboard"
     echo "  down     Stop Hubble and Grafana dashboard"
     echo "  help     Show this help"
+    echo ""
+    echo "add SKIP_CRONTAB=true to your .env to skip installing the autoupgrade crontab"
     exit 0
 fi
+
+echo "❌ Invalid command: $1"
+echo ""
+exec "$0" help

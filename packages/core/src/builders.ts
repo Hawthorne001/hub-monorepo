@@ -24,6 +24,7 @@ type MessageBodyOptions = Pick<
   | "verificationRemoveBody"
   | "userDataBody"
   | "linkBody"
+  | "linkCompactStateBody"
   | "usernameProofBody"
   | "frameActionBody"
 >;
@@ -51,7 +52,7 @@ const makeMessageData = async <TData extends protobufs.MessageData>(
   return validations.validateMessageData(data as TData, publicClients);
 };
 
-const makeMessage = async <TMessage extends protobufs.Message>(
+export const makeMessage = async <TMessage extends protobufs.Message>(
   messageData: protobufs.MessageData,
   signer: Signer,
 ): HubAsyncResult<TMessage> => {
@@ -158,6 +159,18 @@ export const makeLinkAdd = async (
   return makeMessage(data.value, signer);
 };
 
+export const makeLinkCompactState = async (
+  body: protobufs.LinkCompactStateBody,
+  dataOptions: MessageDataOptions,
+  signer: Signer,
+): HubAsyncResult<protobufs.LinkCompactStateMessage> => {
+  const data = await makeLinkCompactStateData(body, dataOptions);
+  if (data.isErr()) {
+    return err(data.error);
+  }
+  return makeMessage(data.value, signer);
+};
+
 export const makeLinkRemove = async (
   body: protobufs.LinkBody,
   dataOptions: MessageDataOptions,
@@ -175,6 +188,13 @@ export const makeLinkAddData = (
   dataOptions: MessageDataOptions,
 ): HubAsyncResult<protobufs.LinkAddData> => {
   return makeMessageData({ linkBody: body }, protobufs.MessageType.LINK_ADD, dataOptions);
+};
+
+export const makeLinkCompactStateData = (
+  body: protobufs.LinkCompactStateBody,
+  dataOptions: MessageDataOptions,
+): HubAsyncResult<protobufs.LinkAddData> => {
+  return makeMessageData({ linkCompactStateBody: body }, protobufs.MessageType.LINK_COMPACT_STATE, dataOptions);
 };
 
 export const makeLinkRemoveData = (

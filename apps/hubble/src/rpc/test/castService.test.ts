@@ -24,11 +24,14 @@ const network = FarcasterNetwork.TESTNET;
 const engine = new Engine(db, network);
 const hub = new MockHub(db, engine);
 
+let syncEngine: SyncEngine;
 let server: Server;
 let client: HubRpcClient;
 
 beforeAll(async () => {
-  server = new Server(hub, engine, new SyncEngine(hub, db));
+  syncEngine = new SyncEngine(hub, db);
+  await syncEngine.start();
+  server = new Server(hub, engine, syncEngine);
   const port = await server.start();
   client = getInsecureHubRpcClient(`127.0.0.1:${port}`);
 });
@@ -86,7 +89,7 @@ describe("getCast", () => {
   test("fails without tsHash", async () => {
     const result = await client.getCast(CastId.create({ fid, hash: new Uint8Array() }));
     expect(result._unsafeUnwrapErr().errCode).toEqual("not_found");
-    expect(result._unsafeUnwrapErr().message).toContain("NotFound");
+    expect(result._unsafeUnwrapErr().message).toContain("not found");
   });
 
   test("fails without fid", async () => {

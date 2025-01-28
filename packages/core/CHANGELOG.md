@@ -1,5 +1,129 @@
 # @farcaster/core
 
+## 0.15.6
+
+### Patch Changes
+
+- 913c0f67: feat: support twitter and github usernames
+
+## 0.15.5
+
+### Patch Changes
+
+- aa9cde75: feat: add user location to the protocol
+
+## 0.15.4
+
+### Patch Changes
+
+- a8736e1d: re-introducing faker dependency
+
+## 0.15.3
+
+### Patch Changes
+
+- f084daa1: feat: request missing on chain events on related submit message errors
+- e5a86114: feat: support bulk message writing rpcs
+
+## 0.15.2
+
+### Patch Changes
+
+- 321658b7: support streaming for sync/reconciliation
+
+## 0.15.1
+
+### Patch Changes
+
+- fbd3ba5f: fix: Move storage unit type helper functions to hub-nodejs package
+- cc0d0a3e: feat: added start/stop time filters for bulk queries
+
+## 0.15.0
+
+### Minor Changes
+
+- dd634c79: feat: Implement Storage Extension FIP
+
+## 0.14.20
+
+### Patch Changes
+
+- 61959467: upgrade libp2p/gossipsub and dependencies
+- 939dde84: chore: upgrade viem to v2
+
+## 0.14.19
+
+### Patch Changes
+
+- 76ad1ac2: feat: Expost event id functions
+
+## 0.14.18
+
+### Patch Changes
+
+- fb0a083a: feat: extend frame message URL max length
+
+## 0.14.17
+
+### Patch Changes
+
+- eacf29c9: fix: http endpoint return not found instead of internal database error
+
+## 0.14.16
+
+### Patch Changes
+
+- dab95118: Add rpc to expose LinkCompactStateMessage + explicit handling of type
+
+## 0.14.15
+
+### Patch Changes
+
+- c424e111: feat: Add support for long casts
+
+## 0.14.14
+
+### Patch Changes
+
+- de52fbce: feat: extend verifications signature max length
+
+## 0.14.13
+
+### Patch Changes
+
+- 911f8b23: Adds missing builder for LinkCompactState
+
+## 0.14.12
+
+### Patch Changes
+
+- c261fba6: added approxSize to getInfo()
+
+## 0.14.11
+
+### Patch Changes
+
+- ab9258af: feat: extend verification signature max length
+- 7b374890: feat: Add Link CompactStateMessage type for link compaction
+
+## 0.14.10
+
+### Patch Changes
+
+- 4c9fb617: feat: allow sharding event stream by fid
+
+## 0.14.9
+
+### Patch Changes
+
+- 5ca5a4a5: feat: Add gossip MessageBundles
+
+## 0.14.8
+
+### Patch Changes
+
+- e30297b9: bug: Enforce protobuf oneof constraints
+
 ## 0.14.7
 
 ### Patch Changes

@@ -1,25 +1,31 @@
 import { jestRocksDB } from "../db/jestUtils.js";
 import Engine from "../engine/index.js";
 import { ValidateOrRevokeMessagesJobScheduler } from "./validateOrRevokeMessagesJob.js";
-import { FarcasterNetwork, Factories, Message, toFarcasterTime, OnChainEvent } from "@farcaster/hub-nodejs";
+import {
+  FarcasterNetwork,
+  Factories,
+  Message,
+  toFarcasterTime,
+  OnChainEvent,
+  MessageType,
+} from "@farcaster/hub-nodejs";
 import {
   HubState,
   IdRegisterOnChainEvent,
-  UserDataAddMessage,
-  UserDataType,
   UserNameType,
   UsernameProofMessage,
   bytesToHexString,
-  bytesToUtf8String,
 } from "@farcaster/core";
 import { jest } from "@jest/globals";
 import { publicClient } from "../../test/utils.js";
 import { getHubState, putHubState } from "../../storage/db/hubState.js";
+import { makeTsHash, makeUserKey } from "../db/message.js";
+import { TRUE_VALUE, UserPostfix } from "../db/types.js";
 
 const db = jestRocksDB("jobs.ValidateOrRevokeMessagesJob.test");
 
 const network = FarcasterNetwork.TESTNET;
-const fid = Factories.Fid.build();
+const fid = 1; // Fixed FID because if a validateOrRevokeMessagesJob runs is dependent on fid
 const signer = Factories.Ed25519Signer.build();
 const custodySigner = Factories.Eip712Signer.build();
 
@@ -27,17 +33,30 @@ let custodyEvent: IdRegisterOnChainEvent;
 let signerEvent: OnChainEvent;
 let storageEvent: OnChainEvent;
 let castAdd: Message;
+let castAddSignerKey: Buffer;
 
-let addFname: UserDataAddMessage;
 let ensNameProof: UsernameProofMessage;
+
+const fakeCurrentTimestamp = 1711056649337; // 21 march 2024
 
 beforeAll(async () => {
   const signerKey = (await signer.getSignerKey())._unsafeUnwrap();
   const custodySignerKey = (await custodySigner.getSignerKey())._unsafeUnwrap();
   custodyEvent = Factories.IdRegistryOnChainEvent.build({ fid }, { transient: { to: custodySignerKey } });
-  signerEvent = Factories.SignerOnChainEvent.build({ fid }, { transient: { signer: signerKey } });
+  signerEvent = Factories.SignerOnChainEvent.build(
+    { fid, blockTimestamp: fakeCurrentTimestamp / 1000 - 1 }, // blockTimestamp is previous second
+    { transient: { signer: signerKey } },
+  );
   storageEvent = Factories.StorageRentOnChainEvent.build({ fid });
   castAdd = await Factories.CastAddMessage.create({ data: { fid, network } }, { transient: { signer } });
+
+  castAddSignerKey = Buffer.concat([
+    makeUserKey(fid),
+    Buffer.from([UserPostfix.BySigner]),
+    Buffer.from(signerKey),
+    Buffer.from([MessageType.CAST_ADD]),
+    makeTsHash(castAdd.data?.timestamp || 0, castAdd.hash)._unsafeUnwrap(),
+  ]);
 
   const custodySignerAddress = bytesToHexString(custodySignerKey)._unsafeUnwrap();
 
@@ -63,16 +82,22 @@ beforeAll(async () => {
 describe("ValidateOrRevokeMessagesJob", () => {
   let engine: Engine;
   let job: ValidateOrRevokeMessagesJobScheduler;
+  let nowOrig: typeof Date.now;
 
   beforeEach(async () => {
     engine = new Engine(db, network, undefined, publicClient);
-    job = new ValidateOrRevokeMessagesJobScheduler(db, engine);
+    job = new ValidateOrRevokeMessagesJobScheduler(db, engine, false);
+
+    nowOrig = Date.now;
+    Date.now = () => fakeCurrentTimestamp;
 
     await engine.start();
   });
 
   afterAll(async () => {
+    Date.now = nowOrig;
     await engine.stop();
+    job.stop();
   });
 
   test("doJobForFid checks message when no fid or lastJobTimestamp", async () => {
@@ -82,10 +107,48 @@ describe("ValidateOrRevokeMessagesJob", () => {
     await engine.mergeOnChainEvent(storageEvent);
 
     await engine.mergeMessage(castAdd);
+    await db.put(castAddSignerKey, TRUE_VALUE);
 
+    expect(await db.get(castAddSignerKey)).toBeDefined();
     const result = await job.doJobForFid(0, fid);
     expect(result.isOk()).toBe(true);
     expect(result._unsafeUnwrap()).toBe(1);
+    await expect(db.get(castAddSignerKey)).rejects.toThrow("NotFound");
+
+    // If we run it again, it checks it again
+    const result2 = await job.doJobForFid(0, fid);
+    expect(result2.isOk()).toBe(true);
+    expect(result2._unsafeUnwrap()).toBe(1);
+  });
+
+  test("doJobForFid checks message when fid % 28 matches", async () => {
+    const engine2 = new Engine(db, network, undefined, publicClient);
+    const job2 = new ValidateOrRevokeMessagesJobScheduler(db, engine2);
+    await engine2.start();
+
+    // There is nothing in the DB, so if we add a message, it should get checked.
+    await engine2.mergeOnChainEvent(custodyEvent);
+    await engine2.mergeOnChainEvent(signerEvent);
+    await engine2.mergeOnChainEvent(storageEvent);
+
+    await engine2.mergeMessage(castAdd);
+
+    const blockTimeToFCTime = toFarcasterTime(1000 * signerEvent.blockTimestamp)._unsafeUnwrap();
+
+    const nowOrig = Date.now;
+    Date.now = () => 1709328889000; // 1 march 2024
+    const result = await job2.doJobForFid(blockTimeToFCTime + 1, fid);
+    expect(result.isOk()).toBe(true);
+    expect(result._unsafeUnwrap()).toBe(1);
+
+    // But if date is 2nd, it should not check the message
+    Date.now = () => 1709415289000; // 2 march 2024
+    const result1 = await job2.doJobForFid(blockTimeToFCTime + 1, fid);
+    expect(result1.isOk()).toBe(true);
+    expect(result1._unsafeUnwrap()).toBe(0);
+
+    await engine2.stop();
+    job2.stop();
   });
 
   test("doJobForFid doesn't check message if lastJobTimestamp > signer", async () => {

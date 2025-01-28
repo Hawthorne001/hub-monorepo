@@ -56,7 +56,7 @@ export enum RootPrefix {
   // Deprecated, DO NOT USE
   // GossipMetrics = 18,
 
-  /* Used to index user submited username proofs */
+  /* Used to index user submitted username proofs */
   UserNameProofByName = 19,
 
   // Deprecated
@@ -133,6 +133,9 @@ export enum UserPostfix {
 
   /* UserNameProof add set */
   UserNameProofAdds = 99,
+
+  /* Link Compact State set */
+  LinkCompactStateMessage = 100,
 }
 
 export enum OnChainEventPostfix {
@@ -156,4 +159,5 @@ export type UserMessagePostfix =
   | UserPostfix.VerificationMessage
   | UserPostfix.ReactionMessage
   | UserPostfix.UserDataMessage
-  | UserPostfix.UsernameProofMessage;
+  | UserPostfix.UsernameProofMessage
+  | UserPostfix.LinkCompactStateMessage;

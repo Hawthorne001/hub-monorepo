@@ -1,12 +1,4 @@
-import {
-  UserNameProof,
-  UserDataAddMessage,
-  UserDataType,
-  getDefaultStoreLimit,
-  StoreType,
-  Message,
-  HubEvent,
-} from "@farcaster/hub-nodejs";
+import { UserNameProof, UserDataAddMessage, UserDataType, HubEvent } from "@farcaster/hub-nodejs";
 import { ResultAsync } from "neverthrow";
 import { UserPostfix } from "../db/types.js";
 import { MessagesPage, PageOptions, StorePruneOptions } from "../stores/types.js";
@@ -22,6 +14,7 @@ import {
   rustErrorToHubError,
 } from "../../rustfunctions.js";
 import { RustStoreBase } from "./rustStoreBase.js";
+import { messageDecode } from "../../storage/db/message.js";
 
 /**
  * UserDataStore persists UserData messages in RocksDB using a grow-only CRDT set to guarantee
@@ -44,7 +37,7 @@ import { RustStoreBase } from "./rustStoreBase.js";
  */
 class UserDataStore extends RustStoreBase<UserDataAddMessage, never> {
   constructor(db: RocksDB, eventHandler: StoreEventHandler, options: StorePruneOptions = {}) {
-    const pruneSizeLimit = options.pruneSizeLimit ?? getDefaultStoreLimit(StoreType.USER_DATA);
+    const pruneSizeLimit = options.pruneSizeLimit ?? 0;
 
     const rustUserDataStore = rsCreateUserDataStore(db.rustDb, eventHandler.getRustStoreEventHandler(), pruneSizeLimit);
 
@@ -63,16 +56,21 @@ class UserDataStore extends RustStoreBase<UserDataAddMessage, never> {
     if (result.isErr()) {
       throw result.error;
     }
-    return Message.decode(new Uint8Array(result.value)) as UserDataAddMessage;
+    return messageDecode(new Uint8Array(result.value)) as UserDataAddMessage;
   }
 
   /** Finds all UserDataAdd messages for an fid */
-  async getUserDataAddsByFid(fid: number, pageOptions: PageOptions = {}): Promise<MessagesPage<UserDataAddMessage>> {
-    const messages_page = await rsGetUserDataAddsByFid(this._rustStore, fid, pageOptions);
+  async getUserDataAddsByFid(
+    fid: number,
+    pageOptions: PageOptions = {},
+    startTime?: number,
+    stopTime?: number,
+  ): Promise<MessagesPage<UserDataAddMessage>> {
+    const messages_page = await rsGetUserDataAddsByFid(this._rustStore, fid, pageOptions, startTime, stopTime);
 
     const messages =
       messages_page.messageBytes?.map((message_bytes) => {
-        return Message.decode(new Uint8Array(message_bytes)) as UserDataAddMessage;
+        return messageDecode(new Uint8Array(message_bytes)) as UserDataAddMessage;
       }) ?? [];
 
     return { messages, nextPageToken: messages_page.nextPageToken };
@@ -107,11 +105,11 @@ class UserDataStore extends RustStoreBase<UserDataAddMessage, never> {
       throw result.error;
     }
 
-    // Read the reuslt bytes as a HubEvent
+    // Read the result bytes as a HubEvent
     const resultBytes = new Uint8Array(result.value);
     const hubEvent = HubEvent.decode(resultBytes);
 
-    void this._eventHandler.processRustCommitedTransaction(hubEvent);
+    void this._eventHandler.processRustCommittedTransaction(hubEvent);
     return hubEvent.id;
   }
 }

@@ -26,8 +26,13 @@ let syncEngine: SyncEngine;
 let server: Server;
 let client: HubRpcClient;
 
+beforeEach(async () => {
+  engine.clearCaches();
+});
+
 beforeAll(async () => {
   syncEngine = new SyncEngine(hub, db);
+  await syncEngine.start();
   server = new Server(hub, engine, syncEngine);
   const port = await server.start();
   client = getInsecureHubRpcClient(`127.0.0.1:${port}`);
@@ -86,7 +91,7 @@ describe("submitMessage", () => {
     test("fails with conflict", async () => {
       await engine.mergeMessage(castRemove);
       const result = await client.submitMessage(castAdd);
-      expect(result).toEqual(err(new HubError("bad_request.conflict", "message conflicts with a CastRemove")));
+      expect(result).toEqual(err(new HubError("bad_request.conflict", "message conflicts with a more recent remove")));
     });
 
     test("fails for frame action", async () => {
@@ -100,7 +105,7 @@ describe("submitMessage", () => {
   test("fails without signer", async () => {
     const result = await client.submitMessage(castAdd);
     const err = result._unsafeUnwrapErr();
-    expect(err.errCode).toEqual("bad_request.validation_failure");
+    expect(err.errCode).toEqual("bad_request.unknown_fid");
     expect(err.message).toMatch("unknown fid");
   });
 });
@@ -127,14 +132,14 @@ describe("validateMessage", () => {
   });
 
   test("fails without signer", async () => {
-    const castResult = await client.submitMessage(castAdd);
+    const castResult = await client.validateMessage(castAdd);
     const castErr = castResult._unsafeUnwrapErr();
-    expect(castErr.errCode).toEqual("bad_request.validation_failure");
+    expect(castErr.errCode).toEqual("bad_request.unknown_fid");
     expect(castErr.message).toMatch("unknown fid");
 
-    const frameResult = await client.submitMessage(frameAction);
+    const frameResult = await client.validateMessage(frameAction);
     const frameErr = frameResult._unsafeUnwrapErr();
-    expect(frameErr.errCode).toEqual("bad_request.validation_failure");
+    expect(frameErr.errCode).toEqual("bad_request.unknown_fid");
     expect(frameErr.message).toMatch("unknown fid");
   });
 });

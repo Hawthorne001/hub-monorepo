@@ -1,12 +1,4 @@
-import {
-  CastId,
-  Message,
-  ReactionAddMessage,
-  ReactionRemoveMessage,
-  ReactionType,
-  StoreType,
-  getDefaultStoreLimit,
-} from "@farcaster/hub-nodejs";
+import { CastId, ReactionAddMessage, ReactionRemoveMessage, ReactionType } from "@farcaster/hub-nodejs";
 import {
   rsCreateReactionStore,
   rsGetReactionAdd,
@@ -22,10 +14,11 @@ import { UserPostfix } from "../db/types.js";
 import { ResultAsync } from "neverthrow";
 import RocksDB from "storage/db/rocksdb.js";
 import { RustStoreBase } from "./rustStoreBase.js";
+import { messageDecode } from "../../storage/db/message.js";
 
 class ReactionStore extends RustStoreBase<ReactionAddMessage, ReactionRemoveMessage> {
   constructor(db: RocksDB, eventHandler: StoreEventHandler, options: StorePruneOptions = {}) {
-    const pruneSizeLimit = options.pruneSizeLimit ?? getDefaultStoreLimit(StoreType.REACTIONS);
+    const pruneSizeLimit = options.pruneSizeLimit ?? 0;
     const rustReactionStore = rsCreateReactionStore(db.rustDb, eventHandler.getRustStoreEventHandler(), pruneSizeLimit);
 
     super(db, rustReactionStore, UserPostfix.ReactionMessage, eventHandler, pruneSizeLimit);
@@ -48,7 +41,7 @@ class ReactionStore extends RustStoreBase<ReactionAddMessage, ReactionRemoveMess
     if (result.isErr()) {
       throw result.error;
     }
-    return Message.decode(new Uint8Array(result.value)) as ReactionAddMessage;
+    return messageDecode(new Uint8Array(result.value)) as ReactionAddMessage;
   }
 
   async getReactionRemove(fid: number, type: ReactionType, target: CastId | string): Promise<ReactionRemoveMessage> {
@@ -68,7 +61,7 @@ class ReactionStore extends RustStoreBase<ReactionAddMessage, ReactionRemoveMess
     if (result.isErr()) {
       throw result.error;
     }
-    return Message.decode(new Uint8Array(result.value)) as ReactionRemoveMessage;
+    return messageDecode(new Uint8Array(result.value)) as ReactionRemoveMessage;
   }
 
   async getReactionAddsByFid(
@@ -80,7 +73,7 @@ class ReactionStore extends RustStoreBase<ReactionAddMessage, ReactionRemoveMess
 
     const messages =
       messages_page.messageBytes?.map((message_bytes) => {
-        return Message.decode(new Uint8Array(message_bytes)) as ReactionAddMessage;
+        return messageDecode(new Uint8Array(message_bytes)) as ReactionAddMessage;
       }) ?? [];
 
     return { messages, nextPageToken: messages_page.nextPageToken };
@@ -95,7 +88,7 @@ class ReactionStore extends RustStoreBase<ReactionAddMessage, ReactionRemoveMess
 
     const messages =
       message_page.messageBytes?.map((message_bytes) => {
-        return Message.decode(new Uint8Array(message_bytes)) as ReactionRemoveMessage;
+        return messageDecode(new Uint8Array(message_bytes)) as ReactionRemoveMessage;
       }) ?? [];
 
     return { messages, nextPageToken: message_page.nextPageToken };
@@ -104,8 +97,10 @@ class ReactionStore extends RustStoreBase<ReactionAddMessage, ReactionRemoveMess
   async getAllReactionMessagesByFid(
     fid: number,
     pageOptions: PageOptions = {},
+    startTime?: number,
+    stopTime?: number,
   ): Promise<MessagesPage<ReactionAddMessage | ReactionRemoveMessage>> {
-    return await this.getAllMessagesByFid(fid, pageOptions);
+    return await this.getAllMessagesByFid(fid, pageOptions, startTime, stopTime);
   }
 
   async getReactionsByTarget(
@@ -132,7 +127,7 @@ class ReactionStore extends RustStoreBase<ReactionAddMessage, ReactionRemoveMess
 
     const messages =
       message_page.messageBytes?.map((message_bytes) => {
-        return Message.decode(new Uint8Array(message_bytes)) as ReactionAddMessage;
+        return messageDecode(new Uint8Array(message_bytes)) as ReactionAddMessage;
       }) ?? [];
 
     return { messages, nextPageToken: message_page.nextPageToken };

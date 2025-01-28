@@ -1,5 +1,428 @@
 # @farcaster/hubble
 
+## 1.18.0
+
+### Minor Changes
+
+- chore: Release 1.18
+
+### Patch Changes
+
+- 85c7e5e3: fix: Ensure we always have a minimum number of connected peers
+
+## 1.17.0
+
+### Minor Changes
+
+- chore: Release 1.17
+
+## 1.16.3
+
+### Patch Changes
+
+- 5080bbb7: chore: introduce a pattern to help standardize log tag names
+
+## 1.16.2
+
+### Patch Changes
+
+- 36847dfc: Place backups in dedicated directory
+- Updated dependencies [913c0f67]
+  - @farcaster/hub-nodejs@0.12.7
+
+## 1.16.1
+
+### Patch Changes
+
+- c2140e26: fix: validate that fid on username add message matches fid on ens proof
+
+## 1.16.0
+
+### Minor Changes
+
+- chore: Update protocol version
+
+### Patch Changes
+
+- Updated dependencies [91b77204]
+  - @farcaster/hub-nodejs@0.12.6
+
+## 1.15.7
+
+### Patch Changes
+
+- aa9cde75: feat: add user location to the protocol
+- d22394f5: chore: add metrics for http/rpc/streaming requests for grafana
+- Updated dependencies [aa9cde75]
+  - @farcaster/hub-nodejs@0.12.5
+
+## 1.15.6
+
+### Patch Changes
+
+- c2c409fb: chore: add metrics for grpc server
+- 1ca66d8c: fix: Limit message bundle size
+
+## 1.15.5
+
+### Patch Changes
+
+- dbf1f155: fix: Split sync health job into 10 min chunks to limit memory usage
+- fff8d7bf: Ignore local/loopback IP traffic in connection limiter
+- 44126c2f: feat: Add `--announce-rpc-port` flag
+- 8923cb71: Ignore rate limits for local loopback traffic
+- 8ce6169a: fix: serialize contact info into a string before logging in sync health job
+- 2717d44d: chore: add contact info to sync health logs
+- cda909b0: fix: add request length limit for getAllMessagesBySyncIds
+  - @farcaster/hub-nodejs@0.12.4
+
+## 1.15.4
+
+### Patch Changes
+
+- 40094001: feat: add the ability to provide peers ip address/port to sync health job
+
+## 1.15.3
+
+### Patch Changes
+
+- 5504e057: feat: add missing messages to sync trie via sync health job
+- 7206e8c5: chore: add more log tags to sync health job
+- 3b1d12ff: chore: add more log tags to sync health errors with message details
+
+## 1.15.2
+
+### Patch Changes
+
+- f084daa1: feat: request missing on chain events on related submit message errors
+- e5a86114: feat: support bulk message writing rpcs
+- Updated dependencies [e5a86114]
+  - @farcaster/hub-nodejs@0.12.3
+
+## 1.15.1
+
+### Patch Changes
+
+- 1943a027: chore: adjust announcement interval for contact info
+- ec80ff3b: fix: direct peering data needs to be processed by the worker due to obscure node behavior
+
+## 1.15.0
+
+### Minor Changes
+
+- feat: Release protocol version 2024.9.4
+
+### Patch Changes
+
+- 8aaae2aa: remove superfluous warn log
+
+## 1.14.5
+
+### Patch Changes
+
+- fbd3ba5f: fix: Move storage unit type helper functions to hub-nodejs package
+- cc0d0a3e: feat: added start/stop time filters for bulk queries
+- Updated dependencies [cc0d0a3e]
+  - @farcaster/hub-nodejs@0.12.1
+
+## 1.14.4
+
+### Patch Changes
+
+- 97c68142: fix: Add env var to specify hubble node arguments
+- dd634c79: feat: Implement Storage Extension FIP
+- Updated dependencies [dd634c79]
+  - @farcaster/hub-nodejs@0.12.0
+
+## 1.14.3
+
+### Patch Changes
+
+- 63dd7c97: feat: make snapshot sync retry and parallelize
+- b2272f76: submit missing messages via the sync health job and enrich output logs
+- cb5ee7ac: feat: added a sync health measurement job
+- 9e0c9323: fix: query for all impacted sync ids via sync health job/command
+
+## 1.14.2
+
+### Patch Changes
+
+- fb2645ee: fix: Include peerid in bootstrap multiaddr
+- 501ceff2: fix: Ensure onchain + username proofs are always assigned to the same shard for linear ordering
+- 61959467: upgrade libp2p/gossipsub and dependencies
+- 939dde84: chore: upgrade viem to v2
+- Updated dependencies [939dde84]
+  - @farcaster/hub-nodejs@0.11.23
+
+## 1.14.1
+
+### Patch Changes
+
+- 2fa29ad4: fix: Upgrade grpc-js to 1.11
+- 095cca97: upgrade libp2p to 0.45.0
+- 7bee8436: perf: Add message merge timing at the store level
+- a9dd1621: revert: storage cache migration to rust
+
+## 1.14.0
+
+### Minor Changes
+
+- be54d203: fix: full state events should not include deleted messages
+
+### Patch Changes
+
+- a5f867fb: fix: Fix incorrect target fid check for link messages older than the compact state
+- d1dce89f: fix: do not let deleted fname events allow old fname events to be re-added
+- 554d82a4: fix: Migrate storage cache to rust and fix race condition
+
+## 1.13.8
+
+### Patch Changes
+
+- 76ad1ac2: feat: Expost event id functions
+- e2b1c7c6: - upgrade libp2p to 0.44.0
+- 97d0a7ea: fix: update hub storage requirement to 200 GB
+  - @farcaster/hub-nodejs@0.11.21
+
+## 1.13.7
+
+### Patch Changes
+
+- 312340d2: feat: Assign shards using jump consistent hashing algorithm
+  - @farcaster/hub-nodejs@0.11.20
+
+## 1.13.6
+
+### Patch Changes
+
+- fdcc3b52: chore: add stats for bundle message delays, stale contact info
+- fa5eef40: fix: Increase message threshold to reduce snapshot bandwidth usage
+- 795815af: fixed issue with cli arguments order in docker-compose.yml causing hub operator fid to be unset
+- b5ff774a: feat: add hub service agreement - there will be no rewards for running a hub
+- 2a82b3dc: feat: add unique peer map to sync engine to represent current active peers
+- aa02a48d: fix: validate gossip message for clock skew
+- 2bae6fb9: chore: Update curve25519-dalek from 4.1.1 to 4.1.3 in Rust extension
+
+## 1.13.5
+
+### Patch Changes
+
+- 224e75fa: fix: gossip contact info every 30 minutes instead of every minute, avoid gossiping contact info on peer connect, skip contact info updates that happen too frequently
+- c723f655: feat: Add endpoints to control sync
+- 667a5b30: feat: add experimental HTTP APIs to control sync
+- Updated dependencies [c723f655]
+  - @farcaster/hub-nodejs@0.11.19
+
+## 1.13.4
+
+### Patch Changes
+
+- 3f0fb85c: fix: remove nemes from mainnet bootstrap peers (deprecated)
+- 366ce95c: fix: Fix gossip worker spending too much time iterating peer store
+
+## 1.13.3
+
+### Patch Changes
+
+- 2d26d305: CLI tool for measuring sync health
+- b150e900: fix: Use stricter socket timeout for gossip
+- eacf29c9: fix: http endpoint return not found instead of internal database error
+  - @farcaster/hub-nodejs@0.11.18
+
+## 1.13.2
+
+### Patch Changes
+
+- e58e963d: fix: Always log when updating contact info
+- 27a1cfc8: fix: updated the cli tool to flush logs before exiting
+- f25f133f: chore: Segment bundle delay stats by message status
+- dab95118: Add rpc to expose LinkCompactStateMessage + explicit handling of type
+- 6ceb8f54: add libp2p/peer-store patch to resolve corrupt peer id loads
+- Updated dependencies [dab95118]
+  - @farcaster/hub-nodejs@0.11.17
+
+## 1.13.1
+
+### Patch Changes
+
+- c424e111: feat: Add support for long casts
+- Updated dependencies [c424e111]
+  - @farcaster/hub-nodejs@0.11.16
+
+## 1.13.0
+
+### Minor Changes
+
+- feat: Release 1.13
+
+### Patch Changes
+
+- 1c2dde78: feat: All HUB_OPTIONS env var to docker compose
+- 35d395f3: [chore] Determine app version via manual JSON.parse instead of import
+  - @farcaster/hub-nodejs@0.11.15
+
+## 1.12.3
+
+### Patch Changes
+
+- a6367658: Retry fetching fname transfers on failed merge
+- 33d43715: feat: Remove the BySigner index to reduce disk usage
+- 053f3ac5: Remove unnecessary database reads when merging casts
+- Updated dependencies [87c4f416]
+  - @farcaster/hub-nodejs@0.11.13
+
+## 1.12.2
+
+### Patch Changes
+
+- 8e7dec10: fix: Fix incorrect link message padding
+- c261fba6: added approxSize to getInfo()
+- 0e342af3: fix: Fetch previous snapshot if current db one is not present
+- 8c759d66: fix: Throttle pruning so hub is not overloaded
+- Updated dependencies [c261fba6]
+  - @farcaster/hub-nodejs@0.11.12
+
+## 1.12.1
+
+### Patch Changes
+
+- 26ced763: fix: Retry uploads of snapshot chunks to R2
+- 4286432d: fix: Check if we need to prune before actually pruning
+- 7b850fb9: fix: Fname index from Little endian -> big endian migration
+
+## 1.12.0
+
+### Minor Changes
+
+- chore: Release 1.12
+
+### Patch Changes
+
+- 23b94856: fix: Use `PutObject` to upload snapshot chunks to R2
+- e3afd5c8: fix: Use priority queue for sync work
+- 063d4ed1: fix: sharding events should work when requesting historical events
+- ec3b4e76: chore: Cleanup bundles code
+- 1642e610: fix: Remove backup fetching for get_node
+- 6bec999d: perf: Use multiple workers for validateOrRevokeMessages job
+- 93de5d76: fix: Prevent unnecessary decode/encode in rpc APIs
+- 089d1d1b: fix: Batch the de-dup check for merging messages
+- 006473dd: perf: Improve getSyncMetadataByPrefix performance
+- 63742239: chore: Cleanup trie batch inserts to use batches
+- 1317f1ce: fix: Use R2 for snapshots
+- f0bee818: fix: Batch insert merkle trie updates
+- 45cf3f40: fix(hubble): Add startup check for hub to verify gRPC port is reachable from public internet. Reachable address is required for hub to perform diff sync via gRPC API and sync with the network. Hub operators may need to enable port-forwarding of traffic to hub's host and port if they are behind a NAT. Startup check emits warning for now, but may be enforced in the future.
+- 5778e3a1: perf: Disable WAL when generating snapshots
+- 7b374890: feat: Add Link CompactStateMessage type for link compaction
+- Updated dependencies [7b374890]
+  - @farcaster/hub-nodejs@0.11.11
+
+## 1.11.8
+
+### Patch Changes
+
+- cd7db2dc: fix: Split the snapshot into 4GB chunks
+
+## 1.11.7
+
+### Patch Changes
+
+- ee1e0543: fix: Restrict `yarn snapshot-url` to mainnet - snapshots are not supported on other networks
+- 4c9fb617: feat: allow sharding event stream by fid
+- dd10cdb1: fix: update diagnostics reports to prefix tags with fid and peer_id
+- 7a1ccc38: fix: Handle axios errors while reporting to Datadog
+- 51907b05: perf: DiffSync v2
+- 3977c682: fix: Don't allow parallel storage cache scans
+- a7b309ee: fix: Use threadpool for trie node ops
+- ac229e2e: fix: Use pagesize=1 when scanning for first key
+- Updated dependencies [4c9fb617]
+  - @farcaster/hub-nodejs@0.11.10
+
+## 1.11.6
+
+### Patch Changes
+
+- 6b4ea835: chore: Run validateOrRevokeMessagesJob once a month for each fid
+- f1ffdd73: fix: Cleanup DB directory after destroy and reset TrieDB before catchupSyncwithSnapshot
+- ce3f4241: perf: Use threadpool to getMany
+- 86566b15: tests: Cleanup after tests properly
+- 36191e5a: chore: update catchup sync with snapshot default to true
+- 5ca5a4a5: feat: Add gossip MessageBundles
+- Updated dependencies [5ca5a4a5]
+  - @farcaster/hub-nodejs@0.11.9
+
+## 1.11.5
+
+### Patch Changes
+
+- 2dcb3e80: fix: Change out-of-order warning to statsd
+- 58b49138: perf: Count keys at prefix directly instead of forEachIterator
+- 0728546f: fix: Create online snapshots using snapshot iterators
+- d90b127d: perf: Support multiple validation workers
+- 5e04c0a7: perf: Move merkle trie to rust
+- b069d1e9: fix: Adjust nightly validateOrRevoke job time to run earlier
+- 5e04c0a7: chore: Migrate trie node data to TrieDB
+- 4fc41e1b: fix: Prune hub events in a threadpool
+- bbc94487: fix: Log memory usage every 60s
+- 05cb3397: perf: Cache trieDB writes
+- 651ba7ac: fix: Throttle storageCache prepopulation
+- c838795d: perf: Run long gRPC queries in a threadpool.
+- ab71a53b: perf: Add LRU Cache for active signer and ID registry events
+- 86e972ec: feat: Add --log-individual-messages to log each submitMessage status. If disabled (default) write one line per second
+- c46790ac: fix: Calculate sleep time correctly for throttling validateOrRevoke job
+- 436139f5: feat(hubble):
+
+  - Add opt-out diagnostics reporting sent to the Farcaster foundation. Users may opt out with CLI flag `--opt-out-diagnostics true` or environment variable `HUB_OPT_OUT_DIAGNOSTICS=true`. Diagnostics are used to troubleshoot user issues and improve health of the network.
+  - Add CLI flag `--diagnostic-report-url <url>`, and environment variables `HUB_DIAGNOSTICS_API_KEY`, `HUB_DIAGNOSTICS_APP_KEY` environment variables to pass in configurable DataDog-compatible URL and authorization tokens.
+
+  fix(hubble): Add `L2_RPC_AUTHORIZATION_HEADER` environment variable for use with L2 RPC URLs that require authorization headers for access.
+
+## 1.11.4
+
+### Patch Changes
+
+- ccd4d96a: fix(hubble): reduce hub bandwidth, can be toggled with GOSSIPSUB_FALLBACK_TO_FLOODSUB and GOSSIPSUB_FLOOD_PUBLISH
+- 5ec735b4: chore: Migrate trie node data to TrieDB
+
+## 1.11.3
+
+### Patch Changes
+
+- e3f49976: fix(hubble): handle edge cases of rocksdb instantiation for snapshot uploads
+
+## 1.11.2
+
+### Patch Changes
+
+- fix: Set catch up sync to true for hubble install script and docker compose
+
+## 1.11.1
+
+### Patch Changes
+
+- e30297b9: bug: Enforce protobuf oneof constraints
+- c678742f: feat(hubble): update s3 snapshot metadata to include database statistics, and add snapshot-url command
+- 751ed729: fix: Run full validateOrRevoke for all fids every 14 days
+- 935246bd: feat(hubble): Add support for using S3 snapshot for "catch up" sync.
+- @farcaster/hub-nodejs@0.11.8
+
+## 1.11.0
+
+### Minor Changes
+
+- chore: Release 1.11
+
+### Patch Changes
+
+- dd1a3e46: chore: Migrate verifications store to rust
+- f115bce1: feat: Generate grpc rust code from protobufs
+- 63e2abe6: perf: Move username proof store to rust
+- 70603192: perf: Throttle prune job
+- ca42eaf0: perf: Migrate cast store to rust
+- 0b523281: fix: Read data_bytes properly when pruning
+- eb2b0e1d: Migrate link store to Rust
+- cfa701c9: feat: stats for hub restarts
+- d2b2f726: chore: Add rustfmt check before git commit
+
 ## 1.10.11
 
 ### Patch Changes
@@ -161,7 +584,7 @@
 ### Patch Changes
 
 - 577d698d: fix: Remove score penalty for duplicate gossip messages
-- 57ce2c66: fix: reduce sync freqency to help reduce hub load
+- 57ce2c66: fix: reduce sync frequency to help reduce hub load
 
 ## 1.9.5
 
@@ -388,7 +811,7 @@
 - 08b652e: fix: Add txIndex to onchain events, fix wrong index being used in the primary key
 - b36eef2: fix: Extract snapshot on the fly while downloading snapshot
 - 93e43a8: fix: Use hashes to compare upgrade 'hubble.sh' versions
-- 7daaae4: fix: Simplify IP addr fetching, prefering ipv4
+- 7daaae4: fix: Simplify IP addr fetching, preferring ipv4
 - ac1f6ac: fix: Fetch envoy config during hubble.sh
 - baf983f: fix: Consume the FID rate limit only after a successful merge
 - Updated dependencies [08b652e]
@@ -405,7 +828,7 @@
 - 52260bc8: chore: Deprecate "status" command
 - 0f83be8f: fix: Reformat grafana dashboard with descriptions
 - 316bcd3a: chore: Remove signer pre-sync for initial sync
-- 3c32cf21: fix: Supress progress logs during tests
+- 3c32cf21: fix: Suppress progress logs during tests
 - 2ab99d95: feat: Add REST API
 - 7fd1f945: fix: Add progress bar for storage cache
 - aac4220f: chore: Add cli options documentation linter
@@ -522,7 +945,7 @@
 - f00d7d2: fix: Move validatorOrRevokeMessage and storageCache iterators to be managed
 - 115f1b5: feat: Do the validateOrRevokeMessages job fid-by-fid
 - 998979d: feat: Warn if there are no incoming connections
-- c1bb21c: fix: When retring messages due to failed signers, use a queue
+- c1bb21c: fix: When retrying messages due to failed signers, use a queue
 - 376ae0f: feat: Use a web based network config for hubble
   - @farcaster/hub-nodejs@0.9.1
 
@@ -884,20 +1307,6 @@
 - Updated dependencies [78d9050]
   - @farcaster/protobufs@0.1.2
   - @farcaster/utils@0.2.1
-
-## 1.0.3
-
-### Patch Changes
-
-- b43fade: feat: add protobufs IdRegistryEvent and SignerStore
-- Updated dependencies [58738a4]
-- Updated dependencies [526bd17]
-- Updated dependencies [b43fade]
-- Updated dependencies [ae7639c]
-- Updated dependencies [cd84f7c]
-- Updated dependencies [2e32983]
-  - @farcaster/utils@0.2.0
-  - @farcaster/protobufs@0.1.1
 
 ## 1.0.3
 
