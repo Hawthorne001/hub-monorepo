@@ -30,7 +30,7 @@
     "@commander-js/extra-typings": "^11.0.0",
     "@farcaster/hub-nodejs": "^0.11.6",
     "@figma/hot-shots": "^9.0.0-figma.1",
-    "bullmq": "^4.11.4",
+    "bullmq": "^5.3.3",
     "commander": "^11.0.0",
     "dotenv": "^16.3.1",
     "fastify": "^4.23.2",
@@ -41,7 +41,7 @@
     "pg": "^8.11.3",
     "pg-cursor": "^2.10.3",
     "pino": "^8.12.1",
-    "pino-pretty": "^10.0.0",
+    "pino-pretty": "^10.3.0",
     "sql-formatter": "^13.0.0",
     "tiny-typed-emitter": "^2.1.0",
     "viem": "^1.12.1"
