@@ -62,6 +62,37 @@ export function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Strips characters that PostgreSQL can store as a `json` escape but cannot
+// later materialize as TEXT — specifically NUL (`\u0000`) and unpaired UTF-16
+// surrogates. These pass `json` validation but throw on `body::jsonb` and on
+// any `body->>'key'` extraction, leaving rows that look fine at INSERT and
+// blow up at read time. Pre-cleaning here keeps every downstream consumer
+// (current `json` text-extraction, future `jsonb` migration) happy.
+// `undefined` is included for compatibility with `MessageBodyJson`'s optional
+// fields (e.g. `parent?: ...`); they serialize as absent keys but the TS type
+// admits `undefined`.
+type JsonValue = string | number | boolean | null | undefined | JsonValue[] | { [k: string]: JsonValue };
+
+export function scrubStringFieldsForPostgresJson(value: JsonValue): JsonValue {
+  if (typeof value === "string") {
+    return value
+      .replace(/\u0000/g, "")
+      .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "")
+      .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+  }
+  if (Array.isArray(value)) {
+    return value.map(scrubStringFieldsForPostgresJson);
+  }
+  if (value !== null && value !== undefined && typeof value === "object") {
+    const out: Record<string, JsonValue> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = scrubStringFieldsForPostgresJson(v);
+    }
+    return out;
+  }
+  return value;
+}
+
 export function bytesToHex(value: Uint8Array): `0x${string}` {
   return `0x${Buffer.from(value).toString("hex")}`;
 }
@@ -241,7 +272,7 @@ export function convertProtobufMessageBodyToJson(message: Message): MessageBodyJ
       throw new Error(`Unknown message type ${message.data?.type}`);
   }
 
-  return body;
+  return scrubStringFieldsForPostgresJson(body as JsonValue) as MessageBodyJson;
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: generic
