@@ -10,6 +10,13 @@ import * as validations from "./validations";
 import { makeVerificationAddressClaim, VerificationAddressClaim } from "./verifications";
 import { getFarcasterTime, toFarcasterTime } from "./time";
 import { makeUserNameProofClaim } from "./userNameProof";
+import {
+  MAX_KEY_TTL_SECONDS,
+  decodeGaslessSignedKeyRequestMetadata,
+  verifyGaslessKeyRequest,
+  verifyKeyAdd,
+  verifyKeyRemove,
+} from "./gaslessKeys";
 
 const fid = Factories.Fid.build();
 const network = protobufs.FarcasterNetwork.TESTNET;
@@ -431,5 +438,197 @@ describe("makeFrameAction", () => {
     );
     const isValid = await validations.validateMessage(message._unsafeUnwrap());
     expect(isValid.isOk()).toBeTruthy();
+  });
+});
+
+describe("gasless signers", () => {
+  const keyAddOptions = () => ({
+    fid: BigInt(fid),
+    key: signerKey,
+    scopes: [protobufs.MessageType.CAST_ADD, protobufs.MessageType.REACTION_ADD],
+    ttl: 30 * 24 * 60 * 60,
+    nonce: 1,
+    deadline: getFarcasterTime()._unsafeUnwrap() + 60 * 60,
+  });
+
+  describe("makeKeyAddBody", () => {
+    test("succeeds", async () => {
+      const body = await builders.makeKeyAddBody(keyAddOptions(), eip712Signer);
+      expect(body.isOk()).toBeTruthy();
+
+      const value = body._unsafeUnwrap();
+      expect(value.key).toEqual(signerKey);
+      expect(value.keyType).toEqual(1);
+      expect(value.metadataType).toEqual(1);
+      expect(value.custodySignature.length).toEqual(65);
+
+      // The custody signature must bind every authorized field.
+      const valid = await verifyKeyAdd(
+        {
+          fid: BigInt(fid),
+          key: value.key,
+          keyType: value.keyType,
+          scopes: value.scopes,
+          ttl: value.ttl,
+          nonce: value.nonce,
+          deadline: BigInt(value.deadline),
+        },
+        value.custodySignature,
+        ethSignerKey,
+      );
+      expect(valid).toEqual(ok(true));
+    });
+
+    test("embeds a SignedKeyRequest recoverable to the request signer", async () => {
+      const body = (await builders.makeKeyAddBody(keyAddOptions(), eip712Signer))._unsafeUnwrap();
+      const metadata = decodeGaslessSignedKeyRequestMetadata(body.metadata)._unsafeUnwrap();
+
+      expect(metadata.requestFid).toEqual(BigInt(fid));
+      expect(metadata.requestSigner.toLowerCase()).toEqual(bytesToHexString(ethSignerKey)._unsafeUnwrap());
+
+      const valid = await verifyGaslessKeyRequest(
+        { requestFid: metadata.requestFid, key: body.key, deadline: metadata.deadline },
+        metadata.signature,
+        ethSignerKey,
+      );
+      expect(valid).toEqual(ok(true));
+    });
+
+    test("uses a separate request signer when the app differs from the user", async () => {
+      const appSigner = Factories.Eip712Signer.build();
+      const appSignerKey = (await appSigner.getSignerKey())._unsafeUnwrap();
+      const appFid = Factories.Fid.build();
+
+      const body = (
+        await builders.makeKeyAddBody({ ...keyAddOptions(), requestFid: BigInt(appFid) }, eip712Signer, appSigner)
+      )._unsafeUnwrap();
+      const metadata = decodeGaslessSignedKeyRequestMetadata(body.metadata)._unsafeUnwrap();
+
+      expect(metadata.requestFid).toEqual(BigInt(appFid));
+      expect(metadata.requestSigner.toLowerCase()).toEqual(bytesToHexString(appSignerKey)._unsafeUnwrap());
+    });
+
+    test("fails with a scope a signer may never hold", async () => {
+      const body = await builders.makeKeyAddBody(
+        { ...keyAddOptions(), scopes: [protobufs.MessageType.KEY_ADD] },
+        eip712Signer,
+      );
+      expect(body).toEqual(err(new HubError("bad_request.validation_failure", "invalid scope: 16")));
+    });
+
+    test("fails with empty scopes", async () => {
+      const body = await builders.makeKeyAddBody({ ...keyAddOptions(), scopes: [] }, eip712Signer);
+      expect(body).toEqual(err(new HubError("bad_request.validation_failure", "scopes is required")));
+    });
+
+    test("fails when the signed key request has already expired", async () => {
+      const body = await builders.makeKeyAddBody(
+        { ...keyAddOptions(), deadline: getFarcasterTime()._unsafeUnwrap() - 60 },
+        eip712Signer,
+      );
+      expect(body).toEqual(err(new HubError("bad_request.validation_failure", "signed key request has expired")));
+    });
+
+    test("fails when the metadata blob is not a valid SignedKeyRequest", async () => {
+      const body = validations.validateKeyAddBody(
+        protobufs.KeyAddBody.create({
+          key: signerKey,
+          keyType: 1,
+          custodySignature: new Uint8Array(65),
+          deadline: getFarcasterTime()._unsafeUnwrap() + 3600,
+          nonce: 1,
+          metadata: new Uint8Array([1, 2, 3]),
+          metadataType: 1,
+          scopes: [protobufs.MessageType.CAST_ADD],
+          ttl: 3600,
+        }),
+      );
+      expect(body).toEqual(
+        err(new HubError("bad_request.validation_failure", "metadata is not a valid SignedKeyRequest")),
+      );
+    });
+
+    test("fails with a ttl beyond the maximum", async () => {
+      const body = await builders.makeKeyAddBody({ ...keyAddOptions(), ttl: MAX_KEY_TTL_SECONDS + 1 }, eip712Signer);
+      expect(body.isErr()).toBeTruthy();
+      expect(body._unsafeUnwrapErr().message).toMatch("ttl must be");
+    });
+  });
+
+  describe("makeKeyAdd", () => {
+    test("succeeds and validates as a message", async () => {
+      const body = (await builders.makeKeyAddBody(keyAddOptions(), eip712Signer))._unsafeUnwrap();
+      const message = await builders.makeKeyAdd(body, { fid, network }, ed25519Signer);
+      expect(message.isOk()).toBeTruthy();
+
+      const value = message._unsafeUnwrap();
+      expect(value.data.type).toEqual(protobufs.MessageType.KEY_ADD);
+      // The envelope signer is the key being added — proof of possession.
+      expect(value.signer).toEqual(signerKey);
+
+      const isValid = await validations.validateMessage(value);
+      expect(isValid.isOk()).toBeTruthy();
+    });
+  });
+
+  describe("makeKeyRemoveBody", () => {
+    test("succeeds with a custody signature", async () => {
+      const body = await builders.makeKeyRemoveBody(
+        { fid: BigInt(fid), key: signerKey, nonce: 2, deadline: getFarcasterTime()._unsafeUnwrap() + 60 * 60 },
+        eip712Signer,
+      );
+      expect(body.isOk()).toBeTruthy();
+
+      const value = body._unsafeUnwrap();
+      expect(value.signatureType).toEqual(1);
+
+      const valid = await verifyKeyRemove(
+        { fid: BigInt(fid), key: value.key, nonce: value.nonce, deadline: BigInt(value.deadline) },
+        value.signature,
+        ethSignerKey,
+      );
+      expect(valid).toEqual(ok(true));
+    });
+
+    test("accepts a past deadline, matching the node", async () => {
+      // KeyRemoveBody has no metadata blob and the node never compares body.deadline to the
+      // message timestamp, so rejecting this here would fail messages the network merges.
+      const body = await builders.makeKeyRemoveBody(
+        { fid: BigInt(fid), key: signerKey, nonce: 2, deadline: getFarcasterTime()._unsafeUnwrap() - 60 },
+        eip712Signer,
+      );
+      expect(body.isOk()).toBeTruthy();
+    });
+  });
+
+  describe("makeKeyRemoveBodySelfRevoke", () => {
+    test("succeeds without a custody signature", async () => {
+      const body = builders.makeKeyRemoveBodySelfRevoke({
+        key: signerKey,
+        nonce: 3,
+        deadline: getFarcasterTime()._unsafeUnwrap() + 60 * 60,
+      });
+      expect(body.isOk()).toBeTruthy();
+      expect(body._unsafeUnwrap().signatureType).toEqual(2);
+      expect(body._unsafeUnwrap().signature.length).toEqual(0);
+    });
+  });
+
+  describe("makeKeyRemove", () => {
+    test("succeeds and validates as a message", async () => {
+      const body = builders
+        .makeKeyRemoveBodySelfRevoke({
+          key: signerKey,
+          nonce: 3,
+          deadline: getFarcasterTime()._unsafeUnwrap() + 60 * 60,
+        })
+        ._unsafeUnwrap();
+      const message = await builders.makeKeyRemove(body, { fid, network }, ed25519Signer);
+      expect(message.isOk()).toBeTruthy();
+      expect(message._unsafeUnwrap().data.type).toEqual(protobufs.MessageType.KEY_REMOVE);
+
+      const isValid = await validations.validateMessage(message._unsafeUnwrap());
+      expect(isValid.isOk()).toBeTruthy();
+    });
   });
 });

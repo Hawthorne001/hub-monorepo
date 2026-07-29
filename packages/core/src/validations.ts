@@ -13,6 +13,16 @@ import {
 } from "./verifications";
 import { normalize } from "viem/ens";
 import { defaultPublicClients, PublicClients } from "./eth/clients";
+import {
+  ADMISSIBLE_KEY_ADD_SCOPES,
+  KEY_REMOVE_SIGNATURE_TYPE_CUSTODY,
+  KEY_REMOVE_SIGNATURE_TYPE_SELF,
+  KEY_TYPE_ED25519,
+  MAX_KEY_ADD_SCOPES,
+  MAX_KEY_TTL_SECONDS,
+  METADATA_TYPE_SIGNED_KEY_REQUEST,
+  decodeGaslessSignedKeyRequestMetadata,
+} from "./gaslessKeys";
 
 /** Number of seconds (10 minutes) that is appropriate for clock skew */
 export const ALLOWED_CLOCK_SKEW_SECONDS = 10 * 60;
@@ -452,6 +462,10 @@ export const validateMessageData = async <T extends protobufs.MessageData>(
     } else {
       bodyResult = validateLendStorageBody(data.lendStorageBody);
     }
+  } else if (validType.value === protobufs.MessageType.KEY_ADD && !!data.keyAddBody) {
+    bodyResult = validateKeyAddBody(data.keyAddBody, data.timestamp);
+  } else if (validType.value === protobufs.MessageType.KEY_REMOVE && !!data.keyRemoveBody) {
+    bodyResult = validateKeyRemoveBody(data.keyRemoveBody);
   } else {
     return err(new HubError("bad_request.invalid_param", "bodyType is invalid"));
   }
@@ -1004,6 +1018,102 @@ export const validateFrameActionBody = (body: protobufs.FrameActionBody): HubRes
 export const validateLendStorageBody = (body: protobufs.LendStorageBody): HubResult<protobufs.LendStorageBody> => {
   if (body.numUnits > 5000) {
     return err(new HubError("bad_request.validation_failure", "num storage units too large"));
+  }
+
+  return ok(body);
+};
+
+/**
+ * Mirrors snapchain's stateless `validate_key_add_body`, plus the two stateless steps of
+ * `verify_signed_key_request_metadata` — that the metadata decodes, and that it has not expired.
+ *
+ * `timestamp` is the enclosing `MessageData.timestamp` in Farcaster seconds. The node compares the
+ * metadata deadline against the message's own timestamp rather than wall-clock time, so replaying
+ * an old-but-valid message stays deterministic; this function does the same. Omit it to run only
+ * the timestamp-independent checks.
+ *
+ * The state-dependent half — custody-address recovery, the `requestFid` custody lookup, nonce
+ * ordering, key collisions, the per-fid cap — happens at merge time and cannot be checked here.
+ */
+export const validateKeyAddBody = (body: protobufs.KeyAddBody, timestamp?: number): HubResult<protobufs.KeyAddBody> => {
+  if (body.key.length !== 32) {
+    return err(new HubError("bad_request.validation_failure", "key must be 32 bytes"));
+  }
+
+  if (body.keyType !== KEY_TYPE_ED25519) {
+    return err(new HubError("bad_request.validation_failure", "invalid key type"));
+  }
+
+  if (body.deadline === 0) {
+    return err(new HubError("bad_request.validation_failure", "deadline is required"));
+  }
+
+  if (body.ttl === 0 || body.ttl > MAX_KEY_TTL_SECONDS) {
+    return err(new HubError("bad_request.validation_failure", `ttl must be > 0 and <= ${MAX_KEY_TTL_SECONDS}`));
+  }
+
+  if (body.metadataType !== METADATA_TYPE_SIGNED_KEY_REQUEST) {
+    return err(new HubError("bad_request.validation_failure", "invalid metadata type"));
+  }
+
+  if (body.metadata.length === 0) {
+    return err(new HubError("bad_request.validation_failure", "metadata is required"));
+  }
+
+  if (body.scopes.length === 0) {
+    return err(new HubError("bad_request.validation_failure", "scopes is required"));
+  }
+
+  if (body.scopes.length > MAX_KEY_ADD_SCOPES) {
+    return err(
+      new HubError("bad_request.validation_failure", `scopes must have at most ${MAX_KEY_ADD_SCOPES} entries`),
+    );
+  }
+
+  for (const scope of body.scopes) {
+    if (!ADMISSIBLE_KEY_ADD_SCOPES.includes(scope)) {
+      return err(new HubError("bad_request.validation_failure", `invalid scope: ${scope}`));
+    }
+  }
+
+  // The deadline that actually gates expiry lives inside the ABI-encoded metadata blob, not on
+  // `body.deadline` — see `verify_signed_key_request_metadata`. `body.deadline` is only checked
+  // non-zero above and bound into the EIP-712 custody signature; the node never compares it to
+  // anything, so neither do we.
+  const metadata = decodeGaslessSignedKeyRequestMetadata(body.metadata);
+  if (metadata.isErr()) {
+    return err(new HubError("bad_request.validation_failure", "metadata is not a valid SignedKeyRequest"));
+  }
+
+  if (timestamp !== undefined && metadata.value.deadline < BigInt(timestamp)) {
+    return err(new HubError("bad_request.validation_failure", "signed key request has expired"));
+  }
+
+  return ok(body);
+};
+
+/**
+ * Mirrors snapchain's stateless `validate_key_remove_body`.
+ *
+ * Deliberately does not check `deadline` for expiry: `KeyRemoveBody` carries no metadata blob, and
+ * the node never compares `body.deadline` to the message timestamp — it only requires it to be
+ * non-zero and binds it into the EIP-712 custody signature. Rejecting a past deadline here would
+ * make this validator stricter than the protocol and fail messages the network merges.
+ */
+export const validateKeyRemoveBody = (body: protobufs.KeyRemoveBody): HubResult<protobufs.KeyRemoveBody> => {
+  if (body.key.length !== 32) {
+    return err(new HubError("bad_request.validation_failure", "key must be 32 bytes"));
+  }
+
+  if (
+    body.signatureType !== KEY_REMOVE_SIGNATURE_TYPE_CUSTODY &&
+    body.signatureType !== KEY_REMOVE_SIGNATURE_TYPE_SELF
+  ) {
+    return err(new HubError("bad_request.validation_failure", "invalid signature type"));
+  }
+
+  if (body.deadline === 0) {
+    return err(new HubError("bad_request.validation_failure", "deadline is required"));
   }
 
   return ok(body);
